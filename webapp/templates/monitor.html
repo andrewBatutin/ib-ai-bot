@@ -105,12 +105,25 @@
         // Fetch all monitored stocks on page load
         refreshStocksList();
         
-        // Setup refresh interval (every 10 seconds)
-        setInterval(refreshStocksList, 10000);
+        // Setup refresh interval (every 5 seconds)
+        let refreshInterval = setInterval(refreshStocksList, 5000);
         
         // Manual refresh button
         $('#refresh-btn').click(function() {
+            // Clear any pending refresh to avoid race conditions
+            clearInterval(refreshInterval);
+            
+            // Immediate refresh
             refreshStocksList();
+            
+            // Restart the interval
+            refreshInterval = setInterval(refreshStocksList, 5000);
+            
+            // Show feedback
+            $(this).text('Refreshing...').addClass('disabled').prop('disabled', true);
+            setTimeout(() => {
+                $(this).text('Refresh Now').removeClass('disabled').prop('disabled', false);
+            }, 1000);
         });
         
         // Add stock form submission
@@ -184,23 +197,45 @@
         
         // Function to refresh the stocks list
         function refreshStocksList() {
+            console.log("Refreshing stocks list...");
+            
+            // Show loading indicator
+            $('#last-update').html('<span class="spinner-border spinner-border-sm" role="status" aria-hidden="true"></span> Updating...');
+            
             $.ajax({
                 url: '/monitor/stocks',
                 type: 'GET',
+                timeout: 10000, // 10 second timeout
+                cache: false,  // Prevent caching
                 success: function(response) {
-                    updateStocksTable(response.stocks);
-                    monitoredStocks = response.stocks;
-                    updateStockCount(Object.keys(response.stocks).length);
-                    updateLastUpdateTime();
-                    updateChartSelector();
+                    console.log("Received stocks data:", response);
                     
-                    // Update chart if a stock is selected
-                    if (selectedStockId && monitoredStocks[selectedStockId]) {
-                        updateChart(selectedStockId);
+                    if (response && response.success && response.stocks) {
+                        updateStocksTable(response.stocks);
+                        monitoredStocks = response.stocks;
+                        updateStockCount(Object.keys(response.stocks).length);
+                        updateLastUpdateTime();
+                        updateChartSelector();
+                        
+                        // Update chart if a stock is selected
+                        if (selectedStockId && monitoredStocks[selectedStockId]) {
+                            updateChart(selectedStockId);
+                        }
+                    } else {
+                        console.error("Invalid response format:", response);
+                        showMessage('stocks-table', 'Invalid data received from server', 'warning');
                     }
                 },
-                error: function() {
-                    showMessage('stocks-table', 'Error fetching stock data', 'danger');
+                error: function(xhr, status, error) {
+                    console.error("Error fetching stock data:", status, error);
+                    showMessage('stocks-table', `Error fetching stock data: ${status}`, 'danger');
+                    $('#last-update').text('Failed to update');
+                },
+                complete: function() {
+                    // If loading indicator is still showing, update it
+                    if ($('#last-update').text().includes('Updating')) {
+                        updateLastUpdateTime();
+                    }
                 }
             });
         }
@@ -267,11 +302,24 @@
         
         // Update the chart with latest price data
         function updateChart(conid) {
+            console.log(`Updating chart for conid: ${conid}`);
+            
+            // Show loading in chart area
+            $('#price-chart').css('opacity', '0.5');
+            $('#no-chart-message').html('<div class="spinner-border text-primary" role="status"><span class="visually-hidden">Loading...</span></div>');
+            $('#no-chart-message').show();
+            
             $.ajax({
                 url: `/monitor/history/${conid}`,
                 type: 'GET',
+                timeout: 10000, // 10 second timeout
+                cache: false,  // Prevent caching
                 success: function(response) {
+                    console.log("Received chart data:", response);
+                    
                     if (!response.success) {
+                        console.error("Error in response:", response.message || "Unknown error");
+                        $('#no-chart-message').text(`Error: ${response.message || "Failed to get chart data"}`);
                         return;
                     }
                     
@@ -279,15 +327,22 @@
                     const stock = response.data.stock;
                     
                     if (!history || history.length === 0) {
+                        console.warn("No price history available");
+                        $('#no-chart-message').text(`No price history available for ${stock.symbol}`);
                         return;
                     }
                     
                     const timestamps = history.map(item => formatTime(item.timestamp));
                     const prices = history.map(item => item.price);
                     
+                    console.log(`Got ${prices.length} price points for chart`);
+                    
                     if (priceChart) {
                         priceChart.destroy();
                     }
+                    
+                    $('#no-chart-message').hide();
+                    $('#price-chart').css('opacity', '1');
                     
                     const ctx = document.getElementById('price-chart').getContext('2d');
                     priceChart = new Chart(ctx, {
@@ -299,22 +354,56 @@
                                 data: prices,
                                 borderColor: 'rgb(75, 192, 192)',
                                 tension: 0.1,
-                                fill: false
+                                fill: false,
+                                pointRadius: 3,
+                                pointHoverRadius: 5
                             }]
                         },
                         options: {
                             responsive: true,
                             maintainAspectRatio: false,
+                            animation: {
+                                duration: 500
+                            },
                             scales: {
                                 y: {
-                                    beginAtZero: false
+                                    beginAtZero: false,
+                                    ticks: {
+                                        callback: function(value) {
+                                            return '$' + value.toFixed(2);
+                                        }
+                                    }
+                                },
+                                x: {
+                                    ticks: {
+                                        maxRotation: 45,
+                                        minRotation: 45
+                                    }
+                                }
+                            },
+                            plugins: {
+                                tooltip: {
+                                    callbacks: {
+                                        label: function(context) {
+                                            return `$${context.raw.toFixed(2)}`;
+                                        }
+                                    }
                                 }
                             }
                         }
                     });
+                    
+                    // If we only have one price point, show a message
+                    if (prices.length <= 1) {
+                        showMessage('chart-stock-select', 'Only one price point available. More will appear as prices update.', 'info');
+                    }
                 },
-                error: function() {
-                    console.error('Error fetching price history');
+                error: function(xhr, status, error) {
+                    console.error('Error fetching price history:', status, error);
+                    $('#no-chart-message').text(`Error loading chart: ${status}`);
+                },
+                complete: function() {
+                    $('#price-chart').css('opacity', '1');
                 }
             });
         }

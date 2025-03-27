@@ -1,4 +1,4 @@
-import requests, time, os, random, json
+import requests, time, os, random, json, asyncio
 from flask import Flask, render_template, request, redirect, jsonify
 
 # disable warnings until you install a certificate
@@ -14,8 +14,30 @@ app = Flask(__name__)
 
 # Import and initialize price monitor
 from price_monitor import init_price_monitor, get_price_monitor
+
+# Initialize price monitor
 price_monitor = init_price_monitor(BASE_API_URL, max_stocks=10, history_size=100)
-price_monitor.start()  # Start the monitoring thread
+
+# This function will be triggered on shutdown
+@app.teardown_appcontext
+def shutdown_price_monitor(exception=None):
+    if hasattr(app, 'price_monitor_running') and app.price_monitor_running:
+        # Can't use async function directly in Flask without async extra
+        # We'll handle shutdown separately
+        app.price_monitor_running = False
+
+# Initialize monitoring in a thread to not block app startup
+def initialize_monitoring():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(price_monitor.start())
+    app.price_monitor_running = True
+    
+# Start monitoring in a separate thread 
+import threading
+monitoring_thread = threading.Thread(target=initialize_monitoring)
+monitoring_thread.daemon = True
+monitoring_thread.start()
 
 @app.template_filter('ctime')
 def timectime(s):
@@ -257,15 +279,22 @@ def monitor_stocks():
 @app.route("/monitor/history/<conid>")
 def monitor_history(conid):
     """Return price history for a specific stock"""
+    import logging
+    logging.info(f"Fetching history for conid: {conid}")
+    
     monitor = get_price_monitor()
     data = monitor.get_stock_data(conid)
     
     if data is None:
+        logging.warning(f"Stock not found: {conid}")
         return jsonify({
             "success": False,
             "message": "Stock not found"
         })
-        
+    
+    # Log the amount of history data
+    logging.info(f"Returning {len(data.get('history', []))} history points for {data.get('stock', {}).get('symbol')}")
+    
     return jsonify({
         "success": True,
         "data": data

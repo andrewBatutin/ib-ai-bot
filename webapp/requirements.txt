@@ -1,6 +1,8 @@
-flask
+flask[async]
 requests
 pandas
 yfinance
 matplotlib
 numpy
+aiohttp
+asyncio
