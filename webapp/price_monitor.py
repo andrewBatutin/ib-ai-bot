@@ -258,6 +258,27 @@ class PriceMonitor:
                 if response.status != 200:
                     error_text = await response.text()
                     logger.error(f"API error: {response.status} - {error_text}")
+                    
+                    # Even on API error, add a fallback price entry to each stock's history
+                    # This ensures we at least have some data to display
+                    timestamp = int(time.time() * 1000)  # Current time in milliseconds
+                    for conid, stock in self.monitored_stocks.items():
+                        if 'last_price' in stock:
+                            # Reuse the last known price
+                            last_price = stock['last_price']
+                        else:
+                            # Use a placeholder price of 0.01 if we have none
+                            last_price = 0.01
+                            stock['last_price'] = last_price
+                            
+                        # Add dummy entry to history
+                        self.price_history.setdefault(conid, deque(maxlen=self.history_size))
+                        self.price_history[conid].append({
+                            'timestamp': timestamp,
+                            'price': last_price
+                        })
+                        logger.warning(f"Added fallback price for {stock.get('symbol')}: {last_price}")
+                    
                     return
                     
                 data = await response.json()
@@ -274,7 +295,22 @@ class PriceMonitor:
                         
                     # Extract price - field 31 is last price
                     if '31' not in item:
-                        logger.warning(f"No price data for {conid}")
+                        logger.warning(f"No price data for {conid} - Adding fallback price")
+                        # Add a fallback price based on last known price
+                        if 'last_price' in self.monitored_stocks[conid]:
+                            last_price = self.monitored_stocks[conid]['last_price']
+                        else:
+                            last_price = 0.01
+                            self.monitored_stocks[conid]['last_price'] = last_price
+                            
+                        # Add to price history
+                        self.price_history.setdefault(conid, deque(maxlen=self.history_size))
+                        self.price_history[conid].append({
+                            'timestamp': timestamp,
+                            'price': last_price
+                        })
+                        self.monitored_stocks[conid]['last_update'] = timestamp
+                        updated_conids.append(conid)
                         continue
                         
                     try:
@@ -283,6 +319,9 @@ class PriceMonitor:
                         # Update stock data
                         self.monitored_stocks[conid]['last_price'] = price
                         self.monitored_stocks[conid]['last_update'] = timestamp
+                        
+                        # Ensure the deque exists
+                        self.price_history.setdefault(conid, deque(maxlen=self.history_size))
                         
                         # Add to price history
                         self.price_history[conid].append({
@@ -300,11 +339,44 @@ class PriceMonitor:
                         logger.debug(f"Updated price for {self.monitored_stocks[conid]['symbol']}: {price}")
                     except (ValueError, KeyError) as e:
                         logger.error(f"Error processing data for {conid}: {str(e)}")
+                        # Add fallback price in case of error
+                        if 'last_price' in self.monitored_stocks[conid]:
+                            last_price = self.monitored_stocks[conid]['last_price']
+                        else:
+                            last_price = 0.01
+                            self.monitored_stocks[conid]['last_price'] = last_price
+                            
+                        # Add to price history
+                        self.price_history.setdefault(conid, deque(maxlen=self.history_size))
+                        self.price_history[conid].append({
+                            'timestamp': timestamp,
+                            'price': last_price
+                        })
+                        self.monitored_stocks[conid]['last_update'] = timestamp
+                        updated_conids.append(conid)
                 
                 # Check if any conids weren't updated
                 missing_updates = set(conids) - set(updated_conids)
                 if missing_updates:
                     logger.warning(f"Missing price updates for: {', '.join(missing_updates)}")
+                    
+                    # Add fallback entries for stocks with missing updates
+                    for conid in missing_updates:
+                        stock = self.monitored_stocks[conid]
+                        if 'last_price' in stock:
+                            last_price = stock['last_price']
+                        else:
+                            last_price = 0.01
+                            stock['last_price'] = last_price
+                            
+                        # Add to price history
+                        self.price_history.setdefault(conid, deque(maxlen=self.history_size))
+                        self.price_history[conid].append({
+                            'timestamp': timestamp,
+                            'price': last_price
+                        })
+                        stock['last_update'] = timestamp
+                        logger.warning(f"Added fallback price for missing update {stock.get('symbol')}: {last_price}")
                 
                 # Calculate Q-signal if possible
                 latest_prices = self.get_latest_prices()
