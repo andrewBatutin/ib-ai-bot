@@ -1,0 +1,346 @@
+{% extends "layout.html" %}
+
+{% block content %}
+
+<h2>Stock Price Monitor</h2>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                Add Stock to Monitor
+            </div>
+            <div class="card-body">
+                <form id="add-stock-form" class="row g-3">
+                    <div class="col-md-8">
+                        <input type="text" class="form-control" id="symbol" name="symbol" placeholder="Enter stock symbol (e.g., AAPL, MSFT)">
+                    </div>
+                    <div class="col-md-4">
+                        <button type="submit" class="btn btn-primary">Add</button>
+                    </div>
+                </form>
+                <div id="add-stock-message" class="mt-2"></div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                Monitor Status
+            </div>
+            <div class="card-body">
+                <p>Monitoring <span id="stock-count" class="fw-bold">0</span> stocks (max: 10)</p>
+                <p>Last update: <span id="last-update">-</span></p>
+                <button id="refresh-btn" class="btn btn-sm btn-secondary">Refresh Now</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                Monitored Stocks
+            </div>
+            <div class="card-body">
+                <table class="table table-striped" id="stocks-table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Name</th>
+                            <th>Last Price</th>
+                            <th>Bid</th>
+                            <th>Ask</th>
+                            <th>Updated</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Stock data will be inserted here -->
+                    </tbody>
+                </table>
+                <div id="no-stocks-message" class="text-center py-3">
+                    No stocks being monitored. Add some above!
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mt-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                Price Chart
+                <div class="float-end">
+                    <select id="chart-stock-select" class="form-select form-select-sm">
+                        <option value="">Select a stock</option>
+                    </select>
+                </div>
+            </div>
+            <div class="card-body">
+                <div>
+                    <canvas id="price-chart" height="300"></canvas>
+                </div>
+                <div id="no-chart-message" class="text-center py-5">
+                    Select a stock above to view its price chart
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Chart.js from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+
+<script>
+    // JavaScript for the monitor page
+    $(document).ready(function() {
+        // Global variables
+        let priceChart = null;
+        let monitoredStocks = {};
+        let selectedStockId = null;
+        
+        // Fetch all monitored stocks on page load
+        refreshStocksList();
+        
+        // Setup refresh interval (every 10 seconds)
+        setInterval(refreshStocksList, 10000);
+        
+        // Manual refresh button
+        $('#refresh-btn').click(function() {
+            refreshStocksList();
+        });
+        
+        // Add stock form submission
+        $('#add-stock-form').submit(function(e) {
+            e.preventDefault();
+            
+            const symbol = $('#symbol').val().trim();
+            if (!symbol) {
+                showMessage('add-stock-message', 'Please enter a stock symbol', 'danger');
+                return;
+            }
+            
+            // Call API to add stock
+            $.ajax({
+                url: '/monitor/add',
+                type: 'POST',
+                contentType: 'application/json',
+                data: JSON.stringify({ symbol: symbol }),
+                success: function(response) {
+                    $('#symbol').val('');
+                    if (response.success) {
+                        showMessage('add-stock-message', response.message, 'success');
+                        refreshStocksList();
+                    } else {
+                        showMessage('add-stock-message', response.message, 'danger');
+                    }
+                },
+                error: function() {
+                    showMessage('add-stock-message', 'Error adding stock', 'danger');
+                }
+            });
+        });
+        
+        // Stock selector for chart
+        $(document).on('change', '#chart-stock-select', function() {
+            selectedStockId = $(this).val();
+            if (selectedStockId) {
+                updateChart(selectedStockId);
+                $('#no-chart-message').hide();
+            } else {
+                if (priceChart) {
+                    priceChart.destroy();
+                    priceChart = null;
+                }
+                $('#no-chart-message').show();
+            }
+        });
+        
+        // Remove stock button
+        $(document).on('click', '.remove-stock-btn', function() {
+            const conid = $(this).data('conid');
+            const symbol = $(this).data('symbol');
+            
+            if (confirm(`Are you sure you want to remove ${symbol} from monitoring?`)) {
+                $.ajax({
+                    url: `/monitor/remove/${conid}`,
+                    type: 'POST',
+                    success: function(response) {
+                        if (response.success) {
+                            refreshStocksList();
+                        } else {
+                            alert('Error: ' + response.message);
+                        }
+                    },
+                    error: function() {
+                        alert('Error removing stock');
+                    }
+                });
+            }
+        });
+        
+        // Function to refresh the stocks list
+        function refreshStocksList() {
+            $.ajax({
+                url: '/monitor/stocks',
+                type: 'GET',
+                success: function(response) {
+                    updateStocksTable(response.stocks);
+                    monitoredStocks = response.stocks;
+                    updateStockCount(Object.keys(response.stocks).length);
+                    updateLastUpdateTime();
+                    updateChartSelector();
+                    
+                    // Update chart if a stock is selected
+                    if (selectedStockId && monitoredStocks[selectedStockId]) {
+                        updateChart(selectedStockId);
+                    }
+                },
+                error: function() {
+                    showMessage('stocks-table', 'Error fetching stock data', 'danger');
+                }
+            });
+        }
+        
+        // Update the stocks table with latest data
+        function updateStocksTable(stocks) {
+            const tableBody = $('#stocks-table tbody');
+            tableBody.empty();
+            
+            if (Object.keys(stocks).length === 0) {
+                $('#stocks-table').hide();
+                $('#no-stocks-message').show();
+                return;
+            }
+            
+            $('#stocks-table').show();
+            $('#no-stocks-message').hide();
+            
+            for (const conid in stocks) {
+                const stock = stocks[conid].stock;
+                const latest = stocks[conid].latest;
+                
+                const lastPrice = latest ? latest.price : '-';
+                const lastUpdate = latest ? formatTime(latest.timestamp) : '-';
+                
+                const row = `
+                    <tr>
+                        <td>${stock.symbol}</td>
+                        <td>${stock.name}</td>
+                        <td class="text-end">${lastPrice}</td>
+                        <td class="text-end">${stock.bid || '-'}</td>
+                        <td class="text-end">${stock.ask || '-'}</td>
+                        <td>${lastUpdate}</td>
+                        <td>
+                            <button class="btn btn-sm btn-danger remove-stock-btn" data-conid="${conid}" data-symbol="${stock.symbol}">
+                                Remove
+                            </button>
+                        </td>
+                    </tr>
+                `;
+                
+                tableBody.append(row);
+            }
+        }
+        
+        // Update the chart selector dropdown
+        function updateChartSelector() {
+            const selector = $('#chart-stock-select');
+            const currentValue = selector.val();
+            
+            selector.empty();
+            selector.append('<option value="">Select a stock</option>');
+            
+            for (const conid in monitoredStocks) {
+                const stock = monitoredStocks[conid].stock;
+                selector.append(`<option value="${conid}">${stock.symbol} - ${stock.name}</option>`);
+            }
+            
+            // Try to restore previous selection
+            if (currentValue && monitoredStocks[currentValue]) {
+                selector.val(currentValue);
+            }
+        }
+        
+        // Update the chart with latest price data
+        function updateChart(conid) {
+            $.ajax({
+                url: `/monitor/history/${conid}`,
+                type: 'GET',
+                success: function(response) {
+                    if (!response.success) {
+                        return;
+                    }
+                    
+                    const history = response.data.history;
+                    const stock = response.data.stock;
+                    
+                    if (!history || history.length === 0) {
+                        return;
+                    }
+                    
+                    const timestamps = history.map(item => formatTime(item.timestamp));
+                    const prices = history.map(item => item.price);
+                    
+                    if (priceChart) {
+                        priceChart.destroy();
+                    }
+                    
+                    const ctx = document.getElementById('price-chart').getContext('2d');
+                    priceChart = new Chart(ctx, {
+                        type: 'line',
+                        data: {
+                            labels: timestamps,
+                            datasets: [{
+                                label: `${stock.symbol} Price`,
+                                data: prices,
+                                borderColor: 'rgb(75, 192, 192)',
+                                tension: 0.1,
+                                fill: false
+                            }]
+                        },
+                        options: {
+                            responsive: true,
+                            maintainAspectRatio: false,
+                            scales: {
+                                y: {
+                                    beginAtZero: false
+                                }
+                            }
+                        }
+                    });
+                },
+                error: function() {
+                    console.error('Error fetching price history');
+                }
+            });
+        }
+        
+        // Helper functions
+        function updateStockCount(count) {
+            $('#stock-count').text(count);
+        }
+        
+        function updateLastUpdateTime() {
+            $('#last-update').text(new Date().toLocaleTimeString());
+        }
+        
+        function formatTime(timestamp) {
+            if (!timestamp) return '-';
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString();
+        }
+        
+        function showMessage(elementId, message, type) {
+            $(`#${elementId}`).html(`<div class="alert alert-${type} py-2">${message}</div>`);
+            setTimeout(() => {
+                $(`#${elementId}`).empty();
+            }, 5000);
+        }
+    });
+</script>
+
+{% endblock %}

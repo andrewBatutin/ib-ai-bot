@@ -1,5 +1,5 @@
-import requests, time, os, random
-from flask import Flask, render_template, request, redirect
+import requests, time, os, random, json
+from flask import Flask, render_template, request, redirect, jsonify
 
 # disable warnings until you install a certificate
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -11,6 +11,11 @@ ACCOUNT_ID = os.environ['IBKR_ACCOUNT_ID']
 os.environ['PYTHONHTTPSVERIFY'] = '0'
 
 app = Flask(__name__)
+
+# Import and initialize price monitor
+from price_monitor import init_price_monitor, get_price_monitor
+price_monitor = init_price_monitor(BASE_API_URL, max_stocks=10, history_size=100)
+price_monitor.start()  # Start the monitoring thread
 
 @app.template_filter('ctime')
 def timectime(s):
@@ -224,3 +229,100 @@ def scanner():
         scan_results = r.json()
 
     return render_template("scanner.html", params=params, scanner_map=scanner_map, filter_map=filter_map, scan_results=scan_results)
+
+
+@app.route("/monitor")
+def monitor():
+    """Render the stock price monitoring dashboard"""
+    return render_template("monitor.html")
+
+
+@app.route("/monitor/stocks")
+def monitor_stocks():
+    """Return all monitored stocks with their latest prices"""
+    monitor = get_price_monitor()
+    return jsonify({
+        "success": True,
+        "stocks": monitor.get_latest_prices()
+    })
+
+
+@app.route("/monitor/history/<conid>")
+def monitor_history(conid):
+    """Return price history for a specific stock"""
+    monitor = get_price_monitor()
+    data = monitor.get_stock_data(conid)
+    
+    if data is None:
+        return jsonify({
+            "success": False,
+            "message": "Stock not found"
+        })
+        
+    return jsonify({
+        "success": True,
+        "data": data
+    })
+
+
+@app.route("/monitor/add", methods=["POST"])
+def monitor_add():
+    """Add a stock to the monitoring list"""
+    try:
+        data = request.get_json()
+        symbol = data.get("symbol", "").strip().upper()
+        
+        if not symbol:
+            return jsonify({
+                "success": False,
+                "message": "Symbol is required"
+            })
+            
+        # Look up the symbol in IB API
+        r = requests.get(f"{BASE_API_URL}/iserver/secdef/search?symbol={symbol}&name=true&secType=STK", verify=False)
+        
+        if r.status_code != 200:
+            return jsonify({
+                "success": False,
+                "message": f"API error: {r.status_code}"
+            })
+            
+        results = r.json()
+        
+        if not results or len(results) == 0:
+            return jsonify({
+                "success": False,
+                "message": f"Symbol not found: {symbol}"
+            })
+            
+        # Use the first match
+        match = results[0]
+        conid = str(match.get("conid"))
+        name = match.get("description", "").split(" - ")[0]
+        
+        # Add to monitor
+        monitor = get_price_monitor()
+        success, message = monitor.add_stock(conid, symbol, name)
+        
+        return jsonify({
+            "success": success,
+            "message": message
+        })
+        
+    except Exception as e:
+        return jsonify({
+            "success": False,
+            "message": f"Error: {str(e)}"
+        })
+
+
+@app.route("/monitor/remove/<conid>", methods=["POST"])
+def monitor_remove(conid):
+    """Remove a stock from the monitoring list"""
+    monitor = get_price_monitor()
+    success, message = monitor.remove_stock(conid)
+    
+    return jsonify({
+        "success": success,
+        "message": message
+    })
