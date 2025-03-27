@@ -4,11 +4,90 @@ import requests
 import json
 from collections import deque
 import logging
-from datetime import datetime
+from datetime import datetime, date, timedelta
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger('price_monitor')
+
+class QStocks:
+    """Class to handle Q-signal and normalized price calculations"""
+    def __init__(self):
+        # Q-stocks tickers from the notebook
+        self.tickers = ['IONQ', 'RGTI', 'QMCO', 'QUBT', 'QBTS']
+        self.q_stocks_conids = {}  # symbol -> conid mapping
+        self.reference_prices = {}  # conid -> first price for normalization
+        self.q_signal_history = deque(maxlen=100)  # Store Q-signal history
+        
+    def add_conid(self, symbol, conid):
+        """Map a symbol to its conid for Q-stocks tracking"""
+        if symbol.upper() in self.tickers:
+            self.q_stocks_conids[symbol.upper()] = conid
+            return True
+        return False
+        
+    def is_q_stock(self, symbol):
+        """Check if a symbol is in the Q-stocks list"""
+        return symbol.upper() in self.tickers
+        
+    def has_all_tickers(self):
+        """Check if all required Q-stocks tickers are tracked"""
+        return all(ticker in self.q_stocks_conids for ticker in self.tickers)
+        
+    def calculate_q_signal(self, price_data):
+        """Calculate normalized prices and Q-signal from current price data"""
+        if not self.has_all_tickers() or not price_data:
+            return None
+        
+        # Get latest prices for all Q-stocks
+        latest_prices = {}
+        timestamp = int(time.time() * 1000)
+        
+        for ticker in self.tickers:
+            conid = self.q_stocks_conids.get(ticker)
+            if not conid or conid not in price_data:
+                return None
+                
+            # Get latest price
+            stock_data = price_data.get(conid)
+            if not stock_data or 'latest' not in stock_data or not stock_data['latest']:
+                return None
+                
+            price = stock_data['latest']['price']
+            latest_prices[ticker] = price
+            
+            # Store reference price (first price seen) for normalization
+            if conid not in self.reference_prices:
+                self.reference_prices[conid] = price
+        
+        # Calculate normalized prices
+        normalized_prices = {}
+        for ticker in self.tickers:
+            conid = self.q_stocks_conids.get(ticker)
+            ref_price = self.reference_prices.get(conid, 1.0)  # Default to 1 if no reference
+            current_price = latest_prices.get(ticker, 0.0)
+            normalized_prices[ticker] = current_price / ref_price if ref_price else 0.0
+        
+        # Calculate Q-signal (average of normalized prices)
+        q_signal = sum(normalized_prices.values()) / len(normalized_prices) if normalized_prices else 0.0
+        
+        # Store in history
+        self.q_signal_history.append({
+            'timestamp': timestamp,
+            'q_signal': q_signal,
+            'normalized_prices': normalized_prices
+        })
+        
+        return {
+            'timestamp': timestamp,
+            'q_signal': q_signal,
+            'normalized_prices': normalized_prices
+        }
+    
+    def get_q_signal_history(self):
+        """Get the full history of Q-signals and normalized prices"""
+        return list(self.q_signal_history)
+
 
 class PriceMonitor:
     def __init__(self, base_api_url, max_stocks=10, history_size=100):
@@ -20,6 +99,7 @@ class PriceMonitor:
         self.running = False
         self.thread = None
         self.lock = threading.Lock()
+        self.q_stocks = QStocks()  # Initialize Q-stocks calculator
         
     def start(self):
         """Start the price monitoring thread"""
@@ -52,10 +132,17 @@ class PriceMonitor:
                 'conid': conid,
                 'symbol': symbol,
                 'name': name,
-                'last_update': 0
+                'last_update': 0,
+                'is_q_stock': self.q_stocks.is_q_stock(symbol)
             }
             
             self.price_history[conid] = deque(maxlen=self.history_size)
+            
+            # If this is a Q-stock, add it to the Q-stocks tracker
+            if self.q_stocks.is_q_stock(symbol):
+                self.q_stocks.add_conid(symbol, conid)
+                logger.info(f"Added Q-stock to monitor: {symbol} ({conid})")
+            
             logger.info(f"Added stock to monitor: {symbol} ({conid})")
             return True, "Stock added successfully"
             
@@ -161,11 +248,58 @@ class PriceMonitor:
                         self.monitored_stocks[conid]['bid'] = float(item['84'])
                     if '86' in item:  # ask price
                         self.monitored_stocks[conid]['ask'] = float(item['86'])
+                
+                # Calculate Q-signal if possible
+                latest_prices = self.get_latest_prices()
+                q_data = self.q_stocks.calculate_q_signal(latest_prices)
+                if q_data:
+                    logger.debug(f"Updated Q-signal: {q_data['q_signal']}")
                         
             logger.debug(f"Updated prices for {len(data)} stocks")
                 
         except Exception as e:
             logger.error(f"Error fetching prices: {str(e)}")
+
+    def get_q_signal_data(self):
+        """Get Q-signal data and status"""
+        with self.lock:
+            # Get the list of Q-stocks tickers
+            q_tickers = self.q_stocks.tickers
+            
+            # Check which Q-stocks are being monitored
+            monitored_q_stocks = {}
+            for conid, stock in self.monitored_stocks.items():
+                if stock.get('is_q_stock', False):
+                    monitored_q_stocks[stock['symbol']] = {
+                        'conid': conid,
+                        'name': stock['name'],
+                        'monitored': True
+                    }
+            
+            # Add missing Q-stocks
+            missing_q_stocks = []
+            for ticker in q_tickers:
+                if ticker not in monitored_q_stocks:
+                    missing_q_stocks.append(ticker)
+                    monitored_q_stocks[ticker] = {
+                        'monitored': False
+                    }
+            
+            # Get Q-signal history
+            q_signal_history = self.q_stocks.get_q_signal_history()
+            
+            has_all_tickers = self.q_stocks.has_all_tickers()
+            
+            return {
+                'q_stocks': monitored_q_stocks,
+                'missing_tickers': missing_q_stocks,
+                'has_all_tickers': has_all_tickers,
+                'q_signal_history': q_signal_history
+            }
+
+    def get_required_q_stocks(self):
+        """Get the list of required Q-stocks tickers"""
+        return self.q_stocks.tickers
 
 # Singleton instance
 _instance = None

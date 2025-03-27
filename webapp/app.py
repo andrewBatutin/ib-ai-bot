@@ -236,6 +236,13 @@ def monitor():
     """Render the stock price monitoring dashboard"""
     return render_template("monitor.html")
 
+@app.route("/q_monitor")
+def q_monitor():
+    """Render the Q-stocks monitoring dashboard"""
+    monitor = get_price_monitor()
+    required_tickers = monitor.get_required_q_stocks()
+    return render_template("q_monitor.html", required_tickers=required_tickers)
+
 
 @app.route("/monitor/stocks")
 def monitor_stocks():
@@ -325,4 +332,32 @@ def monitor_remove(conid):
     return jsonify({
         "success": success,
         "message": message
+    })
+
+@app.route("/monitor/q_stocks")
+def monitor_q_stocks():
+    """Get Q-signal data and status"""
+    monitor = get_price_monitor()
+    data = monitor.get_q_signal_data()
+    
+    return jsonify({
+        "success": True,
+        "data": data
+    })
+
+@app.route("/monitor/q_signal")
+def monitor_q_signal():
+    """Get the current Q-signal and normalized prices"""
+    monitor = get_price_monitor()
+    q_data = monitor.get_q_signal_data()
+    
+    # Get the most recent Q-signal data point
+    history = q_data.get('q_signal_history', [])
+    latest = history[-1] if history else None
+    
+    return jsonify({
+        "success": True,
+        "has_all_tickers": q_data.get('has_all_tickers', False),
+        "missing_tickers": q_data.get('missing_tickers', []),
+        "latest": latest
     })

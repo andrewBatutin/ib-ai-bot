@@ -1,0 +1,351 @@
+{% extends "layout.html" %}
+
+{% block content %}
+
+<h2>Q-Stocks Monitor</h2>
+
+<div class="row mb-4">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                Q-Stocks Status
+            </div>
+            <div class="card-body">
+                <p>Required stocks: <strong>{{ required_tickers|join(', ') }}</strong></p>
+                <div id="status-message"></div>
+                <div id="missing-stocks"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row mb-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                Q-Signal History
+            </div>
+            <div class="card-body">
+                <div>
+                    <canvas id="q-signal-chart" height="300"></canvas>
+                </div>
+                <div id="no-q-signal-message" class="text-center py-3">
+                    No Q-signal data available yet
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-header">
+                Normalized Prices
+            </div>
+            <div class="card-body">
+                <div>
+                    <canvas id="normalized-prices-chart" height="300"></canvas>
+                </div>
+                <div id="no-normalized-prices-message" class="text-center py-3">
+                    No normalized price data available yet
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-12">
+        <div class="card">
+            <div class="card-header">
+                Q-Stocks Data
+            </div>
+            <div class="card-body">
+                <table class="table table-striped" id="q-stocks-table">
+                    <thead>
+                        <tr>
+                            <th>Symbol</th>
+                            <th>Name</th>
+                            <th>Status</th>
+                            <th>Last Price</th>
+                            <th>Normalized Value</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <!-- Q-stock data will be inserted here -->
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Add Chart.js from CDN -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@3.9.1/dist/chart.min.js"></script>
+
+<script>
+    // JavaScript for the Q-stocks monitor page
+    $(document).ready(function() {
+        // Global variables
+        let qSignalChart = null;
+        let normalizedPricesChart = null;
+        let qStocksData = {};
+        
+        // Setup refresh interval (every 10 seconds)
+        refreshQStocksData();
+        setInterval(refreshQStocksData, 10000);
+        
+        // Function to refresh the Q-stocks data
+        function refreshQStocksData() {
+            $.ajax({
+                url: '/monitor/q_stocks',
+                type: 'GET',
+                success: function(response) {
+                    if (response.success) {
+                        qStocksData = response.data;
+                        updateStatusMessage();
+                        updateQStocksTable();
+                        updateQSignalChart();
+                        updateNormalizedPricesChart();
+                    }
+                },
+                error: function() {
+                    showMessage('status-message', 'Error fetching Q-stocks data', 'danger');
+                }
+            });
+        }
+        
+        // Update the status message
+        function updateStatusMessage() {
+            const hasAllTickers = qStocksData.has_all_tickers;
+            const missingTickers = qStocksData.missing_tickers || [];
+            
+            if (hasAllTickers) {
+                $('#status-message').html('<div class="alert alert-success">All required Q-stocks are being monitored!</div>');
+                $('#missing-stocks').empty();
+            } else {
+                $('#status-message').html('<div class="alert alert-warning">Some required Q-stocks are not being monitored yet</div>');
+                
+                if (missingTickers.length > 0) {
+                    let missingHTML = '<div class="alert alert-info">';
+                    missingHTML += '<p>Please add the following stocks to the monitor:</p>';
+                    missingHTML += '<ul>';
+                    
+                    for (const ticker of missingTickers) {
+                        missingHTML += `<li>${ticker}</li>`;
+                    }
+                    
+                    missingHTML += '</ul>';
+                    missingHTML += '<p>Go to <a href="/monitor" class="alert-link">Stock Monitor</a> to add them</p>';
+                    missingHTML += '</div>';
+                    
+                    $('#missing-stocks').html(missingHTML);
+                } else {
+                    $('#missing-stocks').empty();
+                }
+            }
+        }
+        
+        // Update the Q-stocks table
+        function updateQStocksTable() {
+            const tableBody = $('#q-stocks-table tbody');
+            tableBody.empty();
+            
+            const qStocks = qStocksData.q_stocks || {};
+            
+            for (const symbol in qStocks) {
+                const stock = qStocks[symbol];
+                const isMonitored = stock.monitored;
+                
+                let normalizedValue = '-';
+                let lastPrice = '-';
+                
+                // Get latest normalized price if available
+                const history = qStocksData.q_signal_history || [];
+                if (history.length > 0) {
+                    const latest = history[history.length - 1];
+                    if (latest.normalized_prices && latest.normalized_prices[symbol]) {
+                        normalizedValue = latest.normalized_prices[symbol].toFixed(4);
+                    }
+                }
+                
+                // Get last price if stock is monitored
+                if (isMonitored && stock.conid) {
+                    $.ajax({
+                        url: `/monitor/history/${stock.conid}`,
+                        type: 'GET',
+                        async: false, // For simplicity, make this synchronous
+                        success: function(response) {
+                            if (response.success && response.data.history && response.data.history.length > 0) {
+                                const priceHistory = response.data.history;
+                                lastPrice = priceHistory[priceHistory.length - 1].price;
+                            }
+                        }
+                    });
+                }
+                
+                const row = `
+                    <tr>
+                        <td>${symbol}</td>
+                        <td>${stock.name || '-'}</td>
+                        <td>${isMonitored ? '<span class="badge bg-success">Monitored</span>' : '<span class="badge bg-warning">Not Monitored</span>'}</td>
+                        <td>${lastPrice}</td>
+                        <td>${normalizedValue}</td>
+                        <td>
+                            ${isMonitored ? 
+                                `<a href="/contract/${stock.conid}/1m" class="btn btn-sm btn-primary">View</a>` : 
+                                `<a href="/monitor" class="btn btn-sm btn-warning">Add to Monitor</a>`
+                            }
+                        </td>
+                    </tr>
+                `;
+                
+                tableBody.append(row);
+            }
+        }
+        
+        // Update the Q-signal chart
+        function updateQSignalChart() {
+            const history = qStocksData.q_signal_history || [];
+            
+            if (history.length === 0) {
+                $('#no-q-signal-message').show();
+                return;
+            }
+            
+            $('#no-q-signal-message').hide();
+            
+            // Format data for chart
+            const timestamps = history.map(item => formatTime(item.timestamp));
+            const qSignals = history.map(item => item.q_signal);
+            
+            if (qSignalChart) {
+                qSignalChart.destroy();
+            }
+            
+            const ctx = document.getElementById('q-signal-chart').getContext('2d');
+            qSignalChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timestamps,
+                    datasets: [{
+                        label: 'Q-Signal',
+                        data: qSignals,
+                        borderColor: 'rgb(0, 0, 0)',
+                        backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                        tension: 0.1,
+                        fill: true
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Update the normalized prices chart
+        function updateNormalizedPricesChart() {
+            const history = qStocksData.q_signal_history || [];
+            
+            if (history.length === 0) {
+                $('#no-normalized-prices-message').show();
+                return;
+            }
+            
+            $('#no-normalized-prices-message').hide();
+            
+            // Get symbols from most recent data point
+            const latestPoint = history[history.length - 1];
+            const symbols = Object.keys(latestPoint.normalized_prices || {});
+            
+            if (symbols.length === 0) {
+                $('#no-normalized-prices-message').show();
+                return;
+            }
+            
+            // Format data for chart
+            const timestamps = history.map(item => formatTime(item.timestamp));
+            
+            // Create datasets for each symbol
+            const datasets = symbols.map(symbol => {
+                const color = getRandomColor();
+                return {
+                    label: symbol,
+                    data: history.map(item => {
+                        return item.normalized_prices && item.normalized_prices[symbol] 
+                            ? item.normalized_prices[symbol] 
+                            : null;
+                    }),
+                    borderColor: color,
+                    backgroundColor: color + '20',
+                    tension: 0.1,
+                    fill: false
+                };
+            });
+            
+            // Add Q-signal dataset
+            datasets.push({
+                label: 'Q-Signal',
+                data: history.map(item => item.q_signal),
+                borderColor: 'rgb(0, 0, 0)',
+                backgroundColor: 'rgba(0, 0, 0, 0.1)',
+                borderWidth: 2,
+                borderDash: [5, 5],
+                tension: 0.1,
+                fill: false
+            });
+            
+            if (normalizedPricesChart) {
+                normalizedPricesChart.destroy();
+            }
+            
+            const ctx = document.getElementById('normalized-prices-chart').getContext('2d');
+            normalizedPricesChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: timestamps,
+                    datasets: datasets
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y: {
+                            beginAtZero: false
+                        }
+                    }
+                }
+            });
+        }
+        
+        // Helper functions
+        function formatTime(timestamp) {
+            if (!timestamp) return '-';
+            const date = new Date(timestamp);
+            return date.toLocaleTimeString();
+        }
+        
+        function getRandomColor() {
+            const letters = '0123456789ABCDEF';
+            let color = '#';
+            for (let i = 0; i < 6; i++) {
+                color += letters[Math.floor(Math.random() * 16)];
+            }
+            return color;
+        }
+        
+        function showMessage(elementId, message, type) {
+            $(`#${elementId}`).html(`<div class="alert alert-${type} py-2">${message}</div>`);
+            setTimeout(() => {
+                $(`#${elementId}`).empty();
+            }, 5000);
+        }
+    });
+</script>
+
+{% endblock %}

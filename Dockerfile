@@ -6,7 +6,9 @@ RUN apt-get update && apt-get upgrade -y
 # Install JDK and any needed utilities
 RUN apt-get install -y openjdk-17-jre-headless \
                        unzip curl procps vim net-tools \
-                       python3 python3-pip python3.11-venv
+                       python3 python3-pip python3.11-venv \
+                       python3-dev build-essential libpq-dev gcc \
+                       gfortran libblas-dev liblapack-dev libatlas-base-dev
 
 # We will put everything in the /app directory
 WORKDIR /app
@@ -22,6 +24,16 @@ COPY start.sh /app
 
 ADD webapp webapp
 ADD scripts scripts
+
+# Install Python dependencies from requirements.txt
+COPY webapp/requirements.txt /app/webapp/requirements.txt
+RUN python3 -m venv /app/venv && \
+    /app/venv/bin/pip install --upgrade pip wheel setuptools && \
+    /app/venv/bin/pip install -r /app/webapp/requirements.txt
+
+# Ensure the virtual environment is accessible
+ENV PATH="/app/venv/bin:$PATH"
+ENV PYTHONPATH="/app"
 
 # Commented out for now, some commands that are helpful if you want to install your own SSL certificate
 # RUN keytool -genkey -keyalg RSA -alias selfsigned -keystore cacert.jks -storepass abc123 -validity 730 -keysize 2048 -dname CN=localhost
