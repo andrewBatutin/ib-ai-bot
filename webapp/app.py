@@ -12,7 +12,8 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from fincalc.portfolio_analytics import calculate_portfolio_beta
+# Adjusted import based on the new location of fincalc
+from fincalc.portfolio_analytics import calculate_portfolio_beta, dump_portfolio_to_json
 
 # disable warnings until you install a certificate
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
@@ -94,6 +95,17 @@ def dashboard():
     if not account_id:
         app.logger.error("Could not determine Account ID from fetched accounts.")
         return "Could not determine Account ID.", 500
+
+    # --- Attempt to dump portfolio to JSON --- 
+    try:
+        dump_success = dump_portfolio_to_json(BASE_API_URL, account_id)
+        if dump_success:
+            app.logger.info(f"Successfully dumped portfolio for account {account_id} on dashboard load.")
+        else:
+            app.logger.warning(f"Failed to dump portfolio for account {account_id} on dashboard load. Check fincalc logs.")
+    except Exception as dump_ex:
+        app.logger.error(f"Unexpected error calling dump_portfolio_to_json: {dump_ex}", exc_info=True)
+        # Continue dashboard load even if dump fails
 
     try:
         # Fetch Summary

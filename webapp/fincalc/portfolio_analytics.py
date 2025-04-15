@@ -1,5 +1,14 @@
 import pandas as pd
 import numpy as np
+import requests
+import os
+from datetime import datetime
+import logging
+
+# Configure logging for the module if not already configured
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    logging.basicConfig(level=logging.INFO)
 
 def calculate_portfolio_beta(portfolio_holdings, market_data, stock_data):
     """Calculates the market neutrality (Beta) of a portfolio.
@@ -87,3 +96,70 @@ def calculate_portfolio_beta(portfolio_holdings, market_data, stock_data):
     portfolio_beta = (portfolio_holdings['Weight'] * portfolio_holdings['Beta']).sum()
 
     return portfolio_beta
+
+
+def dump_portfolio_to_json(base_api_url: str, account_id: str, output_dir_relative: str = "data") -> bool:
+    """Fetches portfolio positions, converts to a pandas DataFrame, and saves as JSON.
+
+    Args:
+        base_api_url (str): The base URL for the IBKR API.
+        account_id (str): The account ID to fetch positions for.
+        output_dir_relative (str): The directory path relative to the project root
+                                   where the JSON file will be saved. Defaults to "data".
+
+    Returns:
+        bool: True if the portfolio was successfully dumped, False otherwise.
+    """
+    logger.info(f"Attempting to dump portfolio for account {account_id}")
+
+    try:
+        # Construct the full URL
+        positions_url = f"{base_api_url}/portfolio/{account_id}/positions/0"
+        logger.debug(f"Fetching positions from: {positions_url}")
+
+        # Make the API request (disable SSL verification as in app.py)
+        response = requests.get(positions_url, verify=False)
+        response.raise_for_status()  # Raise HTTPError for bad responses (4xx or 5xx)
+
+        positions_raw = response.json()
+
+        if not positions_raw or not isinstance(positions_raw, list):
+            logger.warning(f"No positions data received or data is not a list for account {account_id}.")
+            return False
+
+        # Convert to DataFrame
+        portfolio_df = pd.DataFrame(positions_raw)
+        logger.info(f"Successfully fetched {len(portfolio_df)} positions.")
+
+        # Define the output path
+        # Assume this script is run from project root or path is relative to project root
+        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+        output_path = os.path.join(project_root, output_dir_relative)
+
+        # Create the output directory if it doesn't exist
+        os.makedirs(output_path, exist_ok=True)
+        logger.debug(f"Ensured output directory exists: {output_path}")
+
+        # Define the filename
+        current_date = datetime.now().strftime("%Y-%m-%d")
+        filename = f"portfolio_{current_date}.json"
+        full_filepath = os.path.join(output_path, filename)
+
+        # Save the DataFrame to JSON
+        # Use orient='records' for a list of dicts format, which is common
+        portfolio_df.to_json(full_filepath, orient='records', indent=4)
+        logger.info(f"Portfolio successfully saved to: {full_filepath}")
+        return True
+
+    except requests.exceptions.RequestException as e:
+        logger.error(f"API Error fetching positions for account {account_id}: {e}")
+        return False
+    except ValueError as e: # Handles JSON decoding errors
+        logger.error(f"JSON Decode Error fetching positions: {e}")
+        return False
+    except OSError as e:
+        logger.error(f"File System Error saving portfolio to {output_path}: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"An unexpected error occurred during portfolio dump: {e}", exc_info=True)
+        return False
