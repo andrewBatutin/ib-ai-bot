@@ -213,6 +213,7 @@ def calculate_dollar_neutrality(portfolio_df: pd.DataFrame) -> Optional[float]:
     logger.info(f"Calculated dollar neutrality from DataFrame: {total_market_value}")
     return float(total_market_value)
 
+
 def calculate_portfolio_breakdown(portfolio_df: pd.DataFrame) -> Optional[Tuple[float, float, float, pd.DataFrame]]:
     """
     Analyzes a portfolio DataFrame to provide a breakdown of long/short positions,
