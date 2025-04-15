@@ -37,6 +37,16 @@
             ${{ summary['totalcashvalue']['amount']|round(2) }}<br />
         </td>
     </tr>
+    {% if portfolio_beta is not none %}
+    <tr>
+        <td>
+            Portfolio Beta (vs S&P 500)
+        </td>
+        <td>
+            {{ portfolio_beta }}
+        </td>
+    </tr>
+    {% endif %}
 </table>
 
 {% endblock %}
