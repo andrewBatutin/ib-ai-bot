@@ -6,6 +6,7 @@ from datetime import datetime
 import logging
 import json
 from typing import List, Dict, Any, Optional, Tuple
+import yfinance as yf
 
 # Configure logging for the module if not already configured
 logger = logging.getLogger(__name__)
@@ -202,17 +203,196 @@ def calculate_dollar_neutrality(portfolio_df: pd.DataFrame) -> Optional[float]:
         logger.error("Error: 'mktValue' column contains no valid numeric data.")
         return None
 
-    # Calculate the sum, automatically skipping NaNs
-    total_market_value = mkt_values_numeric.sum()
+    # Calculate the sum, skipping any NaN values that might have resulted from coercion
+    total_value = mkt_values_numeric.sum(skipna=True)
 
-    # Log any values that couldn't be converted if needed (optional)
-    num_invalid = portfolio_df['mktValue'].isnull().sum() + mkt_values_numeric.isnull().sum() - portfolio_df['mktValue'].isnull().sum()
-    if num_invalid > 0:
-        logger.warning(f"Warning: Skipped {num_invalid} non-numeric entries in 'mktValue' column during summation.")
+    logger.info(f"Calculated total market value (dollar neutrality): {total_value}")
+    return float(total_value)
 
-    logger.info(f"Calculated dollar neutrality from DataFrame: {total_market_value}")
-    return float(total_market_value)
 
+def calculate_stock_volatility(tickers: List[str], period: str = "1y") -> Dict[str, Optional[float]]:
+    """
+    Calculates the daily standard deviation (volatility) of stock returns.
+
+    Args:
+        tickers (List[str]): A list of stock ticker symbols.
+        period (str): The period over which to fetch data (e.g., "1mo", "6mo", "1y", "2y", "max").
+                      Defaults to "1y".
+
+    Returns:
+        Dict[str, Optional[float]]: A dictionary mapping each ticker to its daily standard deviation.
+                                     Returns None for a ticker if data is insufficient or invalid.
+    """
+    volatility_results = {}
+    logger.info(f"Calculating volatility for tickers: {tickers} over period: {period}")
+
+    if not tickers:
+        logger.warning("No tickers provided.")
+        return {}
+
+    try:
+        # Download historical data for all tickers at once
+        data = yf.download(tickers, period=period, progress=False)
+
+        if data.empty:
+            logger.error("Failed to download any data.")
+            for ticker in tickers:
+                volatility_results[ticker] = None
+            return volatility_results
+
+        # Use Adjusted Close prices
+        adj_close = data['Close']
+
+        # Handle cases where only one ticker is requested (returns a Series)
+        if isinstance(adj_close, pd.Series):
+            adj_close = adj_close.to_frame(name=tickers[0]) # Convert Series to DataFrame
+
+        # Calculate daily percentage returns
+        daily_returns = adj_close.pct_change().dropna() # Drop the first NaN row
+
+        if daily_returns.empty:
+             logger.warning(f"Not enough data to calculate returns for period {period}.")
+             for ticker in tickers:
+                 volatility_results[ticker] = None
+             return volatility_results
+
+        # Calculate standard deviation for each ticker
+        daily_std_dev = daily_returns.std()
+
+        # Populate results dictionary
+        for ticker in tickers:
+            if ticker in daily_std_dev.index:
+                volatility_results[ticker] = daily_std_dev[ticker]
+            else:
+                # This might happen if yfinance couldn't fetch data for a specific ticker
+                logger.warning(f"Could not calculate volatility for {ticker}, data might be missing.")
+                volatility_results[ticker] = None
+
+    except Exception as e:
+        logger.error(f"An error occurred during volatility calculation: {e}", exc_info=True)
+        # Set all results to None in case of a general download error
+        for ticker in tickers:
+            volatility_results[ticker] = None
+
+    logger.info(f"Volatility calculation complete: {volatility_results}")
+    return volatility_results
+
+def check_volatility_signal(tickers: List[str], volatility_data: Dict[str, Optional[float]], recent_period: str = "5d") -> pd.DataFrame:
+    """
+    Checks if the latest daily return for given tickers exceeds their historical volatility.
+
+    Args:
+        tickers (List[str]): A list of stock ticker symbols.
+        volatility_data (Dict[str, Optional[float]]): A dictionary mapping tickers to their
+                                                      pre-calculated daily standard deviation (sigma).
+                                                      Should come from calculate_stock_volatility.
+        recent_period (str): The period for fetching recent data to calculate the latest return
+                             (e.g., "5d", "10d"). Defaults to "5d".
+
+    Returns:
+        pd.DataFrame: A DataFrame with tickers as index and columns:
+                      - 'latest_return': The most recent daily return (float or None).
+                      - 'sigma': The provided daily volatility (float or None).
+                      - 'is_significant': Boolean indicating if abs(latest_return) > sigma.
+                      - 'status': A message indicating success or failure reason.
+    """
+    signal_results_list = [] # Store results as a list of dicts
+    logger.info(f"Checking volatility signal for tickers: {tickers}")
+
+    if not tickers:
+        logger.warning("No tickers provided for signal check.")
+        return pd.DataFrame(columns=['latest_return', 'sigma', 'is_significant', 'status']).rename_axis('ticker')
+
+    # Pre-populate results for missing volatility data
+    missing_vol_tickers = [t for t in tickers if t not in volatility_data or volatility_data.get(t) is None]
+    for ticker in missing_vol_tickers:
+        signal_results_list.append({'ticker': ticker, 'latest_return': None, 'sigma': None, 'is_significant': False, 'status': 'Missing volatility data'})
+
+    # Tickers we need to fetch data for
+    tickers_to_fetch = [t for t in tickers if t not in missing_vol_tickers]
+
+    if not tickers_to_fetch:
+        logger.warning("All provided tickers were missing volatility data.")
+        return pd.DataFrame.from_records(signal_results_list).set_index('ticker')
+
+    try:
+        # Fetch data for the last ~N trading days to be safe
+        logger.info(f"Fetching recent data for period: {recent_period} for tickers: {tickers_to_fetch}")
+        recent_data = yf.download(tickers_to_fetch, period=recent_period, progress=False)
+
+        if recent_data.empty:
+            logger.error(f"Failed to download recent data for signal check for tickers: {tickers_to_fetch}")
+            for ticker in tickers_to_fetch:
+                signal_results_list.append({'ticker': ticker, 'latest_return': None, 'sigma': volatility_data.get(ticker), 'is_significant': False, 'status': 'Failed to fetch recent data'})
+            return pd.DataFrame.from_records(signal_results_list).set_index('ticker')
+
+        # Get the 'Close' prices
+        recent_close = recent_data['Close']
+
+        # Handle single ticker case
+        if isinstance(recent_close, pd.Series):
+            recent_close = recent_close.to_frame(name=tickers_to_fetch[0])
+
+        if len(recent_close) < 2:
+            logger.warning("Not enough recent data points (need at least 2) to calculate the latest return.")
+            for ticker in tickers_to_fetch:
+                signal_results_list.append({'ticker': ticker, 'latest_return': None, 'sigma': volatility_data.get(ticker), 'is_significant': False, 'status': 'Insufficient recent data'})
+            return pd.DataFrame.from_records(signal_results_list).set_index('ticker')
+
+        # Calculate the latest daily return (percentage change from penultimate to latest day)
+        latest_returns = recent_close.iloc[-1] / recent_close.iloc[-2] - 1
+
+        for ticker in tickers_to_fetch:
+            sigma = volatility_data.get(ticker) # Already checked that sigma exists
+            latest_ret = latest_returns.get(ticker)
+            status = 'Success'
+            is_significant = False
+            final_ret = None
+
+            if latest_ret is None or pd.isna(latest_ret):
+                status = 'Could not calculate latest return'
+            elif sigma is None or pd.isna(sigma): # Should not happen due to pre-check, but safety first
+                status = 'Missing volatility data'
+            else:
+                final_ret = float(latest_ret)
+                is_significant = abs(final_ret) > sigma
+                logger.debug(f"Signal check for {ticker}: Return={latest_ret:.4f}, Sigma={sigma:.4f}, Significant={is_significant}")
+
+            signal_results_list.append({
+                'ticker': ticker,
+                'latest_return': final_ret,
+                'sigma': float(sigma) if sigma is not None else None,
+                'is_significant': bool(is_significant),
+                'status': status
+            })
+
+    except Exception as e:
+        logger.error(f"An error occurred during volatility signal check: {e}", exc_info=True)
+        processed_tickers = {d['ticker'] for d in signal_results_list}
+        for ticker in tickers_to_fetch:
+            if ticker not in processed_tickers:
+                 signal_results_list.append({'ticker': ticker, 'latest_return': None, 'sigma': volatility_data.get(ticker), 'is_significant': False, 'status': f'Error: {e}'})
+
+    # Convert list of dicts to DataFrame
+    results_df = pd.DataFrame.from_records(signal_results_list)
+
+    # Set index and ensure all original tickers are present
+    if not results_df.empty:
+        results_df = results_df.set_index('ticker')
+        # Reindex to include any tickers that might have been missed due to errors, filling with Nones/False
+        results_df = results_df.reindex(tickers)
+        # Fill NaN status potentially introduced by reindexing
+        results_df['status'] = results_df['status'].fillna('Processing Error')
+        results_df['is_significant'] = results_df['is_significant'].fillna(False)
+
+    else: # Handle case where list was empty
+         results_df = pd.DataFrame(index=pd.Index(tickers, name='ticker'), columns=['latest_return', 'sigma', 'is_significant', 'status'])
+         results_df['status'] = 'Processing Error'
+         results_df['is_significant'] = False
+
+
+    logger.info(f"Volatility signal check complete. Returning DataFrame.")
+    return results_df
 
 def calculate_portfolio_breakdown(portfolio_df: pd.DataFrame) -> Optional[Tuple[float, float, float, pd.DataFrame]]:
     """
