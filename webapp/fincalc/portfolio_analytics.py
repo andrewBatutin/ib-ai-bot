@@ -4,6 +4,8 @@ import requests
 import os
 from datetime import datetime
 import logging
+import json
+from typing import List, Dict, Any, Optional, Tuple
 
 # Configure logging for the module if not already configured
 logger = logging.getLogger(__name__)
@@ -163,3 +165,113 @@ def dump_portfolio_to_json(base_api_url: str, account_id: str, output_dir_relati
     except Exception as e:
         logger.error(f"An unexpected error occurred during portfolio dump: {e}", exc_info=True)
         return False
+
+def calculate_dollar_neutrality(portfolio_df: pd.DataFrame) -> Optional[float]:
+    """
+    Calculates the approximate dollar neutrality of a portfolio from a DataFrame.
+
+    Sums the 'mktValue' for all positions in the DataFrame.
+    A value close to zero indicates approximate dollar neutrality.
+
+    Args:
+        portfolio_df: pandas DataFrame containing portfolio positions.
+                      Must contain a column named 'mktValue'.
+
+    Returns:
+        The total market value (sum of 'mktValue') as a float,
+        or None if the input is invalid or the 'mktValue' column is missing/empty.
+    """
+    if not isinstance(portfolio_df, pd.DataFrame):
+        logger.error(f"Error: Input must be a pandas DataFrame, got {type(portfolio_df)}")
+        return None
+
+    if portfolio_df.empty:
+        logger.warning("Warning: Input DataFrame is empty.")
+        return 0.0 # Return 0 for an empty portfolio
+
+    if 'mktValue' not in portfolio_df.columns:
+        logger.error("Error: DataFrame must contain a 'mktValue' column.")
+        return None
+
+    # Attempt to convert mktValue column to numeric, coercing errors to NaN
+    # This handles cases where the column might be object type with non-numeric strings
+    mkt_values_numeric = pd.to_numeric(portfolio_df['mktValue'], errors='coerce')
+
+    # Check if all values became NaN after coercion (meaning no valid numeric data)
+    if mkt_values_numeric.isnull().all():
+        logger.error("Error: 'mktValue' column contains no valid numeric data.")
+        return None
+
+    # Calculate the sum, automatically skipping NaNs
+    total_market_value = mkt_values_numeric.sum()
+
+    # Log any values that couldn't be converted if needed (optional)
+    num_invalid = portfolio_df['mktValue'].isnull().sum() + mkt_values_numeric.isnull().sum() - portfolio_df['mktValue'].isnull().sum()
+    if num_invalid > 0:
+        logger.warning(f"Warning: Skipped {num_invalid} non-numeric entries in 'mktValue' column during summation.")
+
+    logger.info(f"Calculated dollar neutrality from DataFrame: {total_market_value}")
+    return float(total_market_value)
+
+def calculate_portfolio_breakdown(portfolio_df: pd.DataFrame) -> Optional[Tuple[float, float, float, pd.DataFrame]]:
+    """
+    Analyzes a portfolio DataFrame to provide a breakdown of long/short positions,
+    total values, and relative weights.
+
+    Args:
+        portfolio_df: pandas DataFrame containing portfolio positions.
+                      Must contain a column named 'mktValue'.
+
+    Returns:
+        A tuple containing:
+        - total_long_value (float): Sum of market values for all long positions.
+        - total_short_value (float): Sum of absolute market values for all short positions.
+        - total_portfolio_value (float): Sum of absolute market values for all positions.
+        - analyzed_df (pd.DataFrame): Original DataFrame with added columns:
+            - 'PositionType': 'Long', 'Short', or 'Flat'
+            - 'AbsoluteValue': Absolute market value of the position.
+            - 'RelativeWeight': Weight relative to total longs or total shorts.
+        Or None if the input is invalid or calculations fail.
+    """
+    if not isinstance(portfolio_df, pd.DataFrame):
+        logger.error(f"Error: Input must be a pandas DataFrame, got {type(portfolio_df)}")
+        return None
+
+    if 'mktValue' not in portfolio_df.columns:
+        logger.error("Error: DataFrame must contain a 'mktValue' column.")
+        return None
+
+    # Work on a copy to avoid modifying the original DataFrame outside the function scope
+    analyzed_df = portfolio_df.copy()
+
+    # Ensure 'mktValue' is numeric, coerce errors, fill NaNs with 0 for calculation
+    analyzed_df['mktValue'] = pd.to_numeric(analyzed_df['mktValue'], errors='coerce').fillna(0.0)
+
+    # Calculate Absolute Value
+    analyzed_df['AbsoluteValue'] = analyzed_df['mktValue'].abs()
+
+    # Determine Position Type
+    analyzed_df['PositionType'] = 'Flat' # Default
+    analyzed_df.loc[analyzed_df['mktValue'] > 1e-9, 'PositionType'] = 'Long' # Use small tolerance
+    analyzed_df.loc[analyzed_df['mktValue'] < -1e-9, 'PositionType'] = 'Short'
+
+    # Calculate Total Values
+    total_long_value = analyzed_df.loc[analyzed_df['PositionType'] == 'Long', 'mktValue'].sum()
+    total_short_value = analyzed_df.loc[analyzed_df['PositionType'] == 'Short', 'AbsoluteValue'].sum()
+    total_portfolio_value = analyzed_df['AbsoluteValue'].sum()
+
+    # Calculate Relative Weights
+    analyzed_df['RelativeWeight'] = 0.0 # Initialize
+
+    # Avoid division by zero if there are no longs or no shorts
+    if total_long_value > 1e-9:
+        long_mask = analyzed_df['PositionType'] == 'Long'
+        analyzed_df.loc[long_mask, 'RelativeWeight'] = analyzed_df.loc[long_mask, 'mktValue'] / total_long_value
+
+    if total_short_value > 1e-9:
+        short_mask = analyzed_df['PositionType'] == 'Short'
+        analyzed_df.loc[short_mask, 'RelativeWeight'] = analyzed_df.loc[short_mask, 'AbsoluteValue'] / total_short_value
+
+    logger.info(f"Portfolio Breakdown: Longs=${total_long_value:.2f}, Shorts=${total_short_value:.2f}, Total=${total_portfolio_value:.2f}")
+
+    return total_long_value, total_short_value, total_portfolio_value, analyzed_df
