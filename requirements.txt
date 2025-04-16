@@ -1,3 +1,5 @@
 pandas>=1.0.0
 numpy>=1.18.0
 # Add other dependencies like yfinance if needed for data fetching
+yfinance>=0.1.67
+matplotlib>=3.4.3
