@@ -271,31 +271,85 @@ class SimpleBacktester:
 
 
     def plot_results(self):
-        """Plots the portfolio value over time."""
+        """Plots the portfolio value over time and individual security prices with signals."""
         if self.portfolio is None or self.portfolio.empty:
             print("No portfolio data to plot. Run run_backtest() first.")
             return
+        if self.data is None or self.data.empty:
+            print("No price data available for plotting security charts.")
+            return
+        if self.signals is None or self.signals.empty:
+            print("No signal data available for plotting security charts.")
+            return
 
-        plt.figure(figsize=(12, 6))
-        plt.plot(self.portfolio.index, self.portfolio['PortfolioValue'], label='Portfolio Value')
+        num_tickers = len(self.tickers)
+        # Create a figure with plots: 1 for portfolio + 1 for each ticker
+        fig, axes = plt.subplots(num_tickers + 1, 1, figsize=(12, 6 * (num_tickers + 1)), sharex=True)
 
-        # Optional: Add buy/sell markers
-        buy_dates = [trade['Date'] for trade in self.trades if trade['Action'] == 'BUY']
-        sell_dates = [trade['Date'] for trade in self.trades if trade['Action'] == 'SELL']
+        # Ensure axes is always a list-like object, even if only one subplot
+        if num_tickers == 0:
+            ax_portfolio = axes
+        else:
+            ax_portfolio = axes[0]
+            ax_tickers = axes[1:]
 
-        if buy_dates:
-             buy_values = self.portfolio.loc[buy_dates, 'PortfolioValue']
-             plt.scatter(buy_values.index, buy_values.values, marker='^', color='g', label='Buy Signal', alpha=0.7, s=100)
-        if sell_dates:
-             sell_values = self.portfolio.loc[sell_dates, 'PortfolioValue']
-             plt.scatter(sell_values.index, sell_values.values, marker='v', color='r', label='Sell Signal', alpha=0.7, s=100)
+        # 1. Plot Portfolio Value
+        ax_portfolio.plot(self.portfolio.index, self.portfolio['PortfolioValue'], label='Portfolio Value')
+        # Optional: Add buy/sell markers based on actual trades on portfolio plot
+        # Filter trades to match portfolio index dates if necessary
+        valid_trade_dates = [pd.Timestamp(trade['Date']) for trade in self.trades]
+        valid_trades = [trade for trade in self.trades if pd.Timestamp(trade['Date']) in self.portfolio.index]
+        buy_dates_trades = [pd.Timestamp(trade['Date']) for trade in valid_trades if trade['Action'] == 'BUY']
+        sell_dates_trades = [pd.Timestamp(trade['Date']) for trade in valid_trades if trade['Action'] == 'SELL']
 
+        if buy_dates_trades:
+            buy_values = self.portfolio.loc[buy_dates_trades, 'PortfolioValue']
+            ax_portfolio.scatter(buy_values.index, buy_values.values, marker='^', color='g', label='Executed Buy', alpha=0.7, s=100, zorder=5)
+        if sell_dates_trades:
+            sell_values = self.portfolio.loc[sell_dates_trades, 'PortfolioValue']
+            ax_portfolio.scatter(sell_values.index, sell_values.values, marker='v', color='r', label='Executed Sell', alpha=0.7, s=100, zorder=5)
 
-        plt.title('Portfolio Value Over Time')
-        plt.xlabel('Date')
-        plt.ylabel('Portfolio Value ($)')
-        plt.legend()
-        plt.grid(True)
+        ax_portfolio.set_title('Portfolio Value Over Time')
+        ax_portfolio.set_ylabel('Portfolio Value ($)')
+        ax_portfolio.legend()
+        ax_portfolio.grid(True)
+
+        # 2. Plot Individual Security Prices with Signals
+        if num_tickers > 0:
+            # Align signals index with data index if necessary (though backtest should handle this)
+            signals_aligned = self.signals.reindex(self.data.index).fillna(0)
+
+            for i, ticker in enumerate(self.tickers):
+                ax = ax_tickers[i]
+                price_col = f'{ticker}_Close' # Use the close price for plotting
+                if price_col not in self.data.columns:
+                    print(f"Warning: Close price column '{price_col}' not found for {ticker}. Skipping price plot.")
+                    continue
+
+                # Plot price
+                ax.plot(self.data.index, self.data[price_col], label=f'{ticker} Price')
+
+                # Find signal points
+                buy_signals = signals_aligned[signals_aligned[ticker] == 1].index
+                sell_signals = signals_aligned[signals_aligned[ticker] == -1].index
+
+                # Plot signals on price chart if they exist in the data index
+                valid_buy_signals = self.data.index.intersection(buy_signals)
+                valid_sell_signals = self.data.index.intersection(sell_signals)
+
+                if not valid_buy_signals.empty:
+                    ax.scatter(valid_buy_signals, self.data.loc[valid_buy_signals, price_col],
+                               marker='^', color='lime', label='Buy Signal', alpha=0.9, s=80, zorder=5)
+                if not valid_sell_signals.empty:
+                    ax.scatter(valid_sell_signals, self.data.loc[valid_sell_signals, price_col],
+                               marker='v', color='red', label='Sell Signal', alpha=0.9, s=80, zorder=5)
+
+                ax.set_title(f'{ticker} Price and Signals')
+                ax.set_ylabel('Price ($)')
+                ax.legend()
+                ax.grid(True)
+
+        plt.xlabel('Date') # Shared X-axis label
         plt.tight_layout()
         plt.show()
 
