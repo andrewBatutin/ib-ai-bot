@@ -21,7 +21,8 @@ class SimpleBacktester:
                  initial_capital: float = 100000.0,
                  volatility_window: int = 21, # ~1 trading month
                  sigma_threshold: float = 1.0,
-                 trade_size_fraction: float = 0.1): # Fraction of capital per trade
+                 trade_size_fraction: float = 0.1,
+                 interval: str = '1d'): # Fraction of capital per trade
         """
         Initializes the SimpleBacktester.
 
@@ -33,6 +34,7 @@ class SimpleBacktester:
             volatility_window (int): Rolling window size (in days) for volatility calculation.
             sigma_threshold (float): The multiplier for sigma to trigger a signal.
             trade_size_fraction (float): Fraction of current portfolio value to allocate per trade.
+            interval (str): Data interval for yfinance download (e.g., '1d', '1h', '5m').
         """
         if not tickers:
             raise ValueError("Tickers list cannot be empty.")
@@ -44,6 +46,7 @@ class SimpleBacktester:
         self.volatility_window = volatility_window
         self.sigma_threshold = sigma_threshold
         self.trade_size_fraction = trade_size_fraction
+        self.interval = interval
 
         self.data = None # DataFrame to store historical price data
         self.signals = None # DataFrame to store trading signals
@@ -57,10 +60,10 @@ class SimpleBacktester:
 
     def _fetch_data(self):
         """Fetches historical adjusted closing prices using yfinance."""
-        print(f"Fetching data for {self.tickers} from {self.start_date} to {self.end_date}...")
+        print(f"Fetching data for {self.tickers} from {self.start_date} to {self.end_date} with interval {self.interval}...")
         try:
             # Fetch Adj Close for returns, Close for trade execution price
-            data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False)
+            data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False, interval=self.interval, prepost=True)
             if data.empty:
                 raise ValueError("No data fetched. Check tickers and date range.")
 
@@ -111,12 +114,21 @@ class SimpleBacktester:
             # 2. Calculate Rolling Volatility (Standard Deviation of Returns)
             rolling_sigma = daily_returns.rolling(window=self.volatility_window).std()
 
-            # 3. Generate Signals
-            # Condition 1: Return > threshold * sigma (Buy)
-            # Condition 2: Return < -threshold * sigma (Sell)
-            # Use shift(1) for sigma to avoid lookahead bias (use yesterday's sigma for today's signal)
-            buy_signal = daily_returns > (self.sigma_threshold * rolling_sigma.shift(1))
-            sell_signal = daily_returns < (-self.sigma_threshold * rolling_sigma.shift(1))
+            # 3. Calculate Average Rolling Volatility
+            # Calculate the mean of the rolling volatility series *once* per ticker
+            # We need to handle the initial NaNs before calculating the mean
+            valid_rolling_sigma = rolling_sigma.dropna()
+            if valid_rolling_sigma.empty:
+                average_rolling_sigma = np.nan # or some default, or skip signals for this ticker
+            else:
+                average_rolling_sigma = valid_rolling_sigma.mean()
+
+            # 4. Generate Signals based on Average Volatility
+            # Condition 1: Return > threshold * AVERAGE sigma (Buy)
+            # Condition 2: Return < -threshold * AVERAGE sigma (Sell)
+            # No shift needed here as average_rolling_sigma is constant for the ticker
+            buy_signal = daily_returns > (self.sigma_threshold * average_rolling_sigma)
+            sell_signal = daily_returns < (-self.sigma_threshold * average_rolling_sigma)
 
             # Combine signals: 1 for Buy, -1 for Sell, 0 for Hold
             self.signals[ticker] = np.where(buy_signal, 1, np.where(sell_signal, -1, 0))
@@ -313,7 +325,8 @@ if __name__ == "__main__":
         initial_capital=10000.0,
         volatility_window=21, # ~1 month
         sigma_threshold=1.5, # Trade if return > 1.5 * sigma
-        trade_size_fraction=0.2 # Use 20% of portfolio value per trade
+        trade_size_fraction=0.2, # Use 20% of portfolio value per trade
+        interval='5m' # Use 5-minute interval
     )
 
     backtester.run()
