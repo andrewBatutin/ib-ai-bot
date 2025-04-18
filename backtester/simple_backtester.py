@@ -3,7 +3,10 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt # Ensure pyplot is imported
+
+# Import the strategy function
+from .strategies import generate_average_volatility_signals
 
 class SimpleBacktester:
     """
@@ -97,44 +100,39 @@ class SimpleBacktester:
 
 
     def _calculate_signals(self):
-        """Calculates rolling volatility and generates trading signals."""
+        """Calculates trading signals using the selected strategy."""
         if self.data is None or self.data.empty:
             print("No data available. Run _fetch_data() first.")
             return
 
-        print("Calculating signals...")
+        print("Calculating signals using average volatility strategy...")
+        # Use the index from the data DataFrame (which has NaNs dropped)
         self.signals = pd.DataFrame(index=self.data.index)
 
         for ticker in self.tickers:
-            price_series = self.data[ticker]
-
-            # 1. Calculate Daily Returns
-            daily_returns = price_series.pct_change()
-
-            # 2. Calculate Rolling Volatility (Standard Deviation of Returns)
-            rolling_sigma = daily_returns.rolling(window=self.volatility_window).std()
-
-            # 3. Calculate Average Rolling Volatility
-            # Calculate the mean of the rolling volatility series *once* per ticker
-            # We need to handle the initial NaNs before calculating the mean
-            valid_rolling_sigma = rolling_sigma.dropna()
-            if valid_rolling_sigma.empty:
-                average_rolling_sigma = np.nan # or some default, or skip signals for this ticker
+            # Pass the price series (Adj Close or Close) used for return calculation
+            # Determine the correct price column used in _fetch_data
+            price_col_base = ticker if len(self.tickers) == 1 else ticker
+            if price_col_base in self.data.columns:
+                 price_series = self.data[price_col_base]
             else:
-                average_rolling_sigma = valid_rolling_sigma.mean()
+                 # Fallback or error if the primary price column isn't found directly
+                 # This might happen if only _Close columns exist after fetch
+                 # In a multi-ticker scenario, data columns are just ticker names
+                 print(f"Warning: Price column '{price_col_base}' not found directly for {ticker}. Check data structure.")
+                 # Attempt fallback to Adj Close / Close logic might be needed if fetch logic changes
+                 continue # Skip ticker if price data is unclear
 
-            # 4. Generate Signals based on Average Volatility
-            # Condition 1: Return > threshold * AVERAGE sigma (Buy)
-            # Condition 2: Return < -threshold * AVERAGE sigma (Sell)
-            # No shift needed here as average_rolling_sigma is constant for the ticker
-            buy_signal = daily_returns > (self.sigma_threshold * average_rolling_sigma)
-            sell_signal = daily_returns < (-self.sigma_threshold * average_rolling_sigma)
+            # Generate signals using the external function
+            ticker_signals = generate_average_volatility_signals(
+                price_series=price_series,
+                volatility_window=self.volatility_window,
+                sigma_threshold=self.sigma_threshold
+            )
+            self.signals[ticker] = ticker_signals
 
-            # Combine signals: 1 for Buy, -1 for Sell, 0 for Hold
-            self.signals[ticker] = np.where(buy_signal, 1, np.where(sell_signal, -1, 0))
-
-        # Remove initial period where rolling window is not yet full
-        self.signals = self.signals.iloc[self.volatility_window:]
+        # No need to drop initial rows here, strategy function should return aligned series
+        # self.signals = self.signals.iloc[self.volatility_window:] # Removed this line
         print("Signals calculated.")
         # print(self.signals.head()) # Optional: Print head
 
