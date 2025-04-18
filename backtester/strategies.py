@@ -1,4 +1,3 @@
-
 import pandas as pd
 import numpy as np
 
@@ -46,5 +45,47 @@ def generate_average_volatility_signals(price_series: pd.Series, volatility_wind
     # filling potential leading NaNs (from pct_change) with 0 (Hold).
     signals = signals.fillna(0).astype(int)
 
+
+    return signals
+
+def generate_bollinger_bands_signals(price_series: pd.Series, window: int, num_std: float) -> pd.Series:
+    """
+    Generates trading signals based on Bollinger Bands mean reversion.
+
+    Args:
+        price_series (pd.Series): Series of prices for a single ticker.
+        window (int): Rolling window size for SMA and standard deviation.
+        num_std (float): Number of standard deviations for the bands.
+
+    Returns:
+        pd.Series: Series of signals (1 for Buy, -1 for Sell, 0 for Hold).
+    """
+    if price_series.empty or len(price_series) <= window:
+        return pd.Series(0, index=price_series.index, dtype=int) # Not enough data
+
+    # Calculate SMA
+    sma = price_series.rolling(window=window).mean()
+
+    # Calculate Rolling Standard Deviation
+    rolling_std = price_series.rolling(window=window).std()
+
+    # Calculate Bollinger Bands
+    upper_band = sma + (num_std * rolling_std)
+    lower_band = sma - (num_std * rolling_std)
+
+    # Generate signals
+    signals = pd.Series(0, index=price_series.index, dtype=int)
+
+    # Buy signal: Price crosses below lower band
+    # Use shift(1) to check the previous period's condition to trigger on the cross
+    buy_condition = (price_series < lower_band) & (price_series.shift(1) >= lower_band.shift(1))
+    signals[buy_condition] = 1
+
+    # Sell signal: Price crosses above upper band
+    sell_condition = (price_series > upper_band) & (price_series.shift(1) <= upper_band.shift(1))
+    signals[sell_condition] = -1
+
+    # Fill initial NaNs (due to rolling window and shift) with 0
+    signals = signals.fillna(0).astype(int)
 
     return signals

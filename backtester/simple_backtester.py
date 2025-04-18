@@ -5,8 +5,8 @@ import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt # Ensure pyplot is imported
 
-# Import the strategy function
-from .strategies import generate_average_volatility_signals
+# Import the strategy functions
+from .strategies import generate_average_volatility_signals, generate_bollinger_bands_signals
 
 class SimpleBacktester:
     """
@@ -20,46 +20,68 @@ class SimpleBacktester:
     - Assumes trading at the closing price of the signal day.
     """
 
-    def __init__(self, tickers: list, start_date: str, end_date: str,
+    def __init__(self, tickers: list[str],
+                 start_date: str, end_date: str,
+                 strategy_name: str,
+                 strategy_params: dict,
                  initial_capital: float = 100000.0,
-                 volatility_window: int = 21, # ~1 trading month
-                 sigma_threshold: float = 1.0,
                  trade_size_fraction: float = 0.1,
-                 interval: str = '1d'): # Fraction of capital per trade
+                 interval: str = '1d'):
         """
         Initializes the SimpleBacktester.
 
         Args:
-            tickers (list): List of stock ticker symbols.
-            start_date (str): Start date for backtesting (YYYY-MM-DD).
-            end_date (str): End date for backtesting (YYYY-MM-DD).
-            initial_capital (float): Starting capital for the backtest.
-            volatility_window (int): Rolling window size (in days) for volatility calculation.
-            sigma_threshold (float): The multiplier for sigma to trigger a signal.
-            trade_size_fraction (float): Fraction of current portfolio value to allocate per trade.
-            interval (str): Data interval for yfinance download (e.g., '1d', '1h', '5m').
+            tickers (list): List of ticker symbols.
+            start_date (str): Start date (YYYY-MM-DD).
+            end_date (str): End date (YYYY-MM-DD).
+            strategy_name (str): Name of the strategy to use (e.g., 'average_volatility', 'bollinger_bands').
+            strategy_params (dict): Dictionary of parameters for the chosen strategy.
+                                    Example for 'average_volatility': {'volatility_window': 21, 'sigma_threshold': 1.5}
+                                    Example for 'bollinger_bands': {'window': 20, 'num_std': 2.0}
+            initial_capital (float, optional): Starting capital. Defaults to 100000.
+            trade_size_fraction (float, optional): Fraction of portfolio value per trade. Defaults to 0.1.
+            interval (str, optional): yfinance data interval. Defaults to '1d'.
         """
         if not tickers:
             raise ValueError("Tickers list cannot be empty.")
+        if not isinstance(tickers, list):
+            tickers = [tickers]
 
         self.tickers = tickers
         self.start_date = start_date
         self.end_date = end_date
+        self.strategy_name = strategy_name
+        self.strategy_params = strategy_params
         self.initial_capital = initial_capital
-        self.volatility_window = volatility_window
-        self.sigma_threshold = sigma_threshold
         self.trade_size_fraction = trade_size_fraction
         self.interval = interval
+
+        # Validate strategy parameters based on name
+        self._validate_strategy_params()
 
         self.data = None # DataFrame to store historical price data
         self.signals = None # DataFrame to store trading signals
         self.portfolio = None # DataFrame to track portfolio value and positions
-        self.trades = [] # List to store details of executed trades
+        self.trades = [] # List to store trade details
 
         # Internal state for simulation
         self._cash = self.initial_capital
         self._positions = {ticker: 0.0 for ticker in self.tickers} # Shares held
         self._portfolio_history = [] # List of (date, portfolio_value) tuples
+
+    def _validate_strategy_params(self):
+        """Validates if the required parameters are present for the selected strategy."""
+        required_params = {}
+        if self.strategy_name == 'average_volatility':
+            required_params = {'volatility_window', 'sigma_threshold'}
+        elif self.strategy_name == 'bollinger_bands':
+            required_params = {'window', 'num_std'}
+        else:
+            raise ValueError(f"Unknown strategy name: {self.strategy_name}")
+
+        missing_params = required_params - set(self.strategy_params.keys())
+        if missing_params:
+            raise ValueError(f"Missing parameters for strategy '{self.strategy_name}': {missing_params}")
 
     def _fetch_data(self):
         """Fetches historical adjusted closing prices using yfinance."""
@@ -105,36 +127,39 @@ class SimpleBacktester:
             print("No data available. Run _fetch_data() first.")
             return
 
-        print("Calculating signals using average volatility strategy...")
-        # Use the index from the data DataFrame (which has NaNs dropped)
+        print(f"Calculating signals using '{self.strategy_name}' strategy...")
         self.signals = pd.DataFrame(index=self.data.index)
 
         for ticker in self.tickers:
-            # Pass the price series (Adj Close or Close) used for return calculation
-            # Determine the correct price column used in _fetch_data
             price_col_base = ticker if len(self.tickers) == 1 else ticker
             if price_col_base in self.data.columns:
-                 price_series = self.data[price_col_base]
+                price_series = self.data[price_col_base]
             else:
-                 # Fallback or error if the primary price column isn't found directly
-                 # This might happen if only _Close columns exist after fetch
-                 # In a multi-ticker scenario, data columns are just ticker names
-                 print(f"Warning: Price column '{price_col_base}' not found directly for {ticker}. Check data structure.")
-                 # Attempt fallback to Adj Close / Close logic might be needed if fetch logic changes
-                 continue # Skip ticker if price data is unclear
+                print(f"Warning: Price column '{price_col_base}' not found directly for {ticker}. Skipping signal calculation.")
+                self.signals[ticker] = 0 # Assign hold signal if price data is missing
+                continue
 
-            # Generate signals using the external function
-            ticker_signals = generate_average_volatility_signals(
-                price_series=price_series,
-                volatility_window=self.volatility_window,
-                sigma_threshold=self.sigma_threshold
-            )
+            # Dynamically call the selected strategy function
+            if self.strategy_name == 'average_volatility':
+                ticker_signals = generate_average_volatility_signals(
+                    price_series=price_series,
+                    volatility_window=self.strategy_params['volatility_window'],
+                    sigma_threshold=self.strategy_params['sigma_threshold']
+                )
+            elif self.strategy_name == 'bollinger_bands':
+                ticker_signals = generate_bollinger_bands_signals(
+                    price_series=price_series,
+                    window=self.strategy_params['window'],
+                    num_std=self.strategy_params['num_std']
+                )
+            else:
+                # This should not happen due to validation in __init__, but added for safety
+                print(f"Error: Strategy '{self.strategy_name}' function not implemented in _calculate_signals.")
+                ticker_signals = pd.Series(0, index=price_series.index, dtype=int)
+
             self.signals[ticker] = ticker_signals
 
-        # No need to drop initial rows here, strategy function should return aligned series
-        # self.signals = self.signals.iloc[self.volatility_window:] # Removed this line
         print("Signals calculated.")
-        # print(self.signals.head()) # Optional: Print head
 
 
     def run_backtest(self):
@@ -366,26 +391,39 @@ class SimpleBacktester:
 
 # --- Example Usage ---
 if __name__ == "__main__":
-    tickers_to_test = ['AAPL', 'MSFT']#, 'GOOGL'] # Example tickers
-    start = '2021-01-01'
-    end = '2023-12-31'
-
-    backtester = SimpleBacktester(
-        tickers=tickers_to_test,
-        start_date=start,
-        end_date=end,
+    # Example 1: Average Volatility Strategy
+    print("--- Running Average Volatility Strategy ---")
+    avg_vol_params = {
+        'volatility_window': 21, # ~1 month
+        'sigma_threshold': 1.5   # Trade if return > 1.5 * avg sigma
+    }
+    backtester_avg_vol = SimpleBacktester(
+        tickers=['AAPL', 'MSFT'],
+        start_date='2023-01-01',
+        end_date='2023-12-31',
+        strategy_name='average_volatility',
+        strategy_params=avg_vol_params,
         initial_capital=10000.0,
-        volatility_window=21, # ~1 month
-        sigma_threshold=1.5, # Trade if return > 1.5 * sigma
         trade_size_fraction=0.2, # Use 20% of portfolio value per trade
-        interval='5m' # Use 5-minute interval
+        interval='1d'
     )
+    backtester_avg_vol.run()
+    print("\n")
 
-    backtester.run()
-    backtester.plot_results() # Show plot after running
-
-    # Access results if needed
-    # performance_results = backtester.calculate_performance()
-    # trades_log = pd.DataFrame(backtester.trades)
-    # print("\nTrade Log:")
-    # print(trades_log)
+    # Example 2: Bollinger Bands Strategy
+    print("--- Running Bollinger Bands Strategy ---")
+    bb_params = {
+        'window': 20,    # 20-day SMA
+        'num_std': 2.0   # 2 standard deviations
+    }
+    backtester_bb = SimpleBacktester(
+        tickers=['NVDA'],
+        start_date='2023-01-01',
+        end_date='2023-12-31',
+        strategy_name='bollinger_bands',
+        strategy_params=bb_params,
+        initial_capital=10000.0,
+        trade_size_fraction=0.25,
+        interval='1d'
+    )
+    backtester_bb.run()
