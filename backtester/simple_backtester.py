@@ -26,7 +26,8 @@ class SimpleBacktester:
                  strategy_params: dict,
                  initial_capital: float = 100000.0,
                  trade_size_fraction: float = 0.1,
-                 interval: str = '1d'):
+                 interval: str = '1d',
+                 commission_per_trade: float = 0.0):
         """
         Initializes the SimpleBacktester.
 
@@ -41,6 +42,7 @@ class SimpleBacktester:
             initial_capital (float, optional): Starting capital. Defaults to 100000.
             trade_size_fraction (float, optional): Fraction of portfolio value per trade. Defaults to 0.1.
             interval (str, optional): yfinance data interval. Defaults to '1d'.
+            commission_per_trade (float, optional): Fixed commission cost per trade. Defaults to 0.0.
         """
         if not tickers:
             raise ValueError("Tickers list cannot be empty.")
@@ -55,6 +57,7 @@ class SimpleBacktester:
         self.initial_capital = initial_capital
         self.trade_size_fraction = trade_size_fraction
         self.interval = interval
+        self.commission_per_trade = commission_per_trade # Store commission
 
         # Validate strategy parameters based on name
         self._validate_strategy_params()
@@ -174,7 +177,9 @@ class SimpleBacktester:
 
         if side == 'BUY':
             trade_cost = shares * price
-            if self._cash >= trade_cost:
+            commission = self.commission_per_trade
+            total_cost = trade_cost + commission
+            if self._cash >= total_cost:
                 # Update average cost *before* changing position
                 current_position = self._positions[ticker]
                 current_total_cost = self._average_cost[ticker] * current_position
@@ -186,16 +191,17 @@ class SimpleBacktester:
                 else:
                     self._average_cost[ticker] = 0 # Reset if position becomes zero (unlikely on buy)
 
-                self._cash -= trade_cost
+                self._cash -= total_cost
                 self._positions[ticker] = new_position
                 self.trades.append({
                     'date': date, 'ticker': ticker, 'side': side,
                     'shares': shares, 'price': price, 'trade_value': trade_cost,
-                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl # PnL is 0 for buy
+                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl, # PnL is 0 for buy
+                    'commission': commission
                 })
                 # print(f"{date}: BOUGHT {shares:.4f} {ticker} @ {price:.2f}") # Optional log
             else:
-                print(f"Warning: Insufficient cash ({self._cash:.2f}) to buy {shares:.4f} {ticker} @ {price:.2f} (Cost: {trade_cost:.2f}) on {date}. Skipping trade.")
+                print(f"Warning: Insufficient cash ({self._cash:.2f}) to buy {shares:.4f} {ticker} @ {price:.2f} (Cost: {trade_cost:.2f}, Commission: {commission:.2f}) on {date}. Skipping trade.")
         elif side == 'SELL':
             # Ensure we have enough shares to sell (allow for float precision issues)
             # Sell at most the shares we currently hold
@@ -212,7 +218,8 @@ class SimpleBacktester:
                      pnl = 0.0 # PnL is 0 if selling without a tracked buy/cost basis
                      # print(f"Warning: Selling {shares_to_sell:.4f} {ticker} on {date} without a recorded average cost.")
 
-                self._cash += trade_proceeds
+                commission = self.commission_per_trade
+                self._cash += trade_proceeds - commission
                 self._positions[ticker] -= shares_to_sell
 
                 # Reset average cost if position is closed (or very close to zero)
@@ -223,7 +230,8 @@ class SimpleBacktester:
                 self.trades.append({
                     'date': date, 'ticker': ticker, 'side': side,
                     'shares': shares_to_sell, 'price': price, 'trade_value': trade_proceeds,
-                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl # Record realized PnL
+                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl, # Record realized PnL
+                    'commission': commission
                 })
                 # print(f"{date}: SOLD {shares_to_sell:.4f} {ticker} @ {price:.2f}, PnL: {pnl:.2f}") # Optional log
             # else: # If shares_to_sell is negligible or negative, don't execute
@@ -635,7 +643,8 @@ if __name__ == "__main__":
         strategy_params=avg_vol_params,
         initial_capital=10000.0,
         trade_size_fraction=0.2, # Use 20% of portfolio value per trade
-        interval='1d'
+        interval='1d',
+        commission_per_trade=5.0
     )
     backtester_avg_vol.run()
     print("\n")
@@ -654,6 +663,7 @@ if __name__ == "__main__":
         strategy_params=bb_params,
         initial_capital=10000.0,
         trade_size_fraction=0.25,
-        interval='1d'
+        interval='1d',
+        commission_per_trade=5.0
     )
     backtester_bb.run()
