@@ -68,6 +68,7 @@ class SimpleBacktester:
         self._cash = self.initial_capital
         self._positions = {ticker: 0.0 for ticker in self.tickers} # Shares held
         self._portfolio_history = [] # List of (date, portfolio_value) tuples
+        self._average_cost = {ticker: 0.0 for ticker in self.tickers} # Initialize average cost dictionary
 
     def _validate_strategy_params(self):
         """Validates if the required parameters are present for the selected strategy."""
@@ -162,6 +163,74 @@ class SimpleBacktester:
         print("Signals calculated.")
 
 
+    def _execute_trade(self, date, ticker, side, shares, price):
+        """Executes a single trade and updates portfolio state, including average cost and PnL."""
+        # Ensure shares and price are valid numbers
+        if not isinstance(shares, (int, float)) or not isinstance(price, (int, float)) or pd.isna(shares) or pd.isna(price) or shares <= 1e-9 or price <= 0:
+             print(f"Warning: Invalid shares ({shares}) or price ({price}) for trade on {date} for {ticker}. Skipping.")
+             return
+
+        pnl = 0.0 # Initialize PnL for this trade
+
+        if side == 'BUY':
+            trade_cost = shares * price
+            if self._cash >= trade_cost:
+                # Update average cost *before* changing position
+                current_position = self._positions[ticker]
+                current_total_cost = self._average_cost[ticker] * current_position
+                new_position = current_position + shares
+
+                if new_position > 1e-9: # Avoid division by zero
+                    new_total_cost = current_total_cost + trade_cost
+                    self._average_cost[ticker] = new_total_cost / new_position
+                else:
+                    self._average_cost[ticker] = 0 # Reset if position becomes zero (unlikely on buy)
+
+                self._cash -= trade_cost
+                self._positions[ticker] = new_position
+                self.trades.append({
+                    'date': date, 'ticker': ticker, 'side': side,
+                    'shares': shares, 'price': price, 'trade_value': trade_cost,
+                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl # PnL is 0 for buy
+                })
+                # print(f"{date}: BOUGHT {shares:.4f} {ticker} @ {price:.2f}") # Optional log
+            else:
+                print(f"Warning: Insufficient cash ({self._cash:.2f}) to buy {shares:.4f} {ticker} @ {price:.2f} (Cost: {trade_cost:.2f}) on {date}. Skipping trade.")
+        elif side == 'SELL':
+            # Ensure we have enough shares to sell (allow for float precision issues)
+            # Sell at most the shares we currently hold
+            shares_to_sell = min(shares, self._positions[ticker])
+
+            if shares_to_sell > 1e-9: # Check if there's a meaningful amount to sell
+                trade_proceeds = shares_to_sell * price
+
+                # Calculate PnL based on the average cost of the shares being sold
+                if self._average_cost[ticker] > 0: # Ensure we have a valid average cost
+                    cost_of_goods_sold = self._average_cost[ticker] * shares_to_sell
+                    pnl = trade_proceeds - cost_of_goods_sold
+                else:
+                     pnl = 0.0 # PnL is 0 if selling without a tracked buy/cost basis
+                     # print(f"Warning: Selling {shares_to_sell:.4f} {ticker} on {date} without a recorded average cost.")
+
+                self._cash += trade_proceeds
+                self._positions[ticker] -= shares_to_sell
+
+                # Reset average cost if position is closed (or very close to zero)
+                if abs(self._positions[ticker]) < 1e-9:
+                    self._positions[ticker] = 0.0 # Clean up small residuals
+                    self._average_cost[ticker] = 0.0 # Reset average cost
+
+                self.trades.append({
+                    'date': date, 'ticker': ticker, 'side': side,
+                    'shares': shares_to_sell, 'price': price, 'trade_value': trade_proceeds,
+                    'avg_cost_after': self._average_cost[ticker], 'pnl': pnl # Record realized PnL
+                })
+                # print(f"{date}: SOLD {shares_to_sell:.4f} {ticker} @ {price:.2f}, PnL: {pnl:.2f}") # Optional log
+            # else: # If shares_to_sell is negligible or negative, don't execute
+            #    if shares > 1e-9: # Only warn if the *requested* sell was significant
+            #         print(f"Warning: Attempted to sell {shares:.4f} {ticker} on {date}, but holding {self._positions[ticker]:.4f}. Selling {shares_to_sell:.4f}.")
+
+
     def run_backtest(self):
         """Runs the backtest simulation based on generated signals."""
         if self.signals is None or self.signals.empty:
@@ -174,123 +243,284 @@ class SimpleBacktester:
         self._portfolio_history = []
         self.trades = []
 
-        # Align data with signals index
-        backtest_data = self.data.loc[self.signals.index]
+        # Align data with signals index - Ensure data covers the signal period + 1 for execution
+        # We need prices for the day *after* the signal is generated
+        min_signal_date = self.signals.index.min()
+        max_signal_date = self.signals.index.max()
 
-        for date, daily_signals in self.signals.iterrows():
-            current_portfolio_value = self._cash
-            prices_today = {}
+        # Ensure data includes the day after the last signal for execution
+        # Note: This might require fetching slightly more data initially if end_date was tight
+        backtest_data = self.data.loc[min_signal_date:]
 
-            # Calculate current portfolio value based on yesterday's close/today's open logic proxy
-            # For simplicity, we use today's close price from the data for valuation *before* trading
+        # --- FIX: Shift signals by 1 period to avoid lookahead bias ---
+        # The signal generated at time `t` (based on data up to `t`) is used for trading at time `t+1`
+        signals_shifted = self.signals.shift(1).dropna() # Shift and remove the first row (NaN)
+
+        # Iterate through the *shifted* signals index
+        for date in signals_shifted.index:
+            # Ensure the current date exists in our price data (it should, as we shifted)
+            if date not in backtest_data.index:
+                # print(f"Warning: Price data missing for execution date {date}. Skipping.") # Optional warning
+                continue
+
+            # --- Portfolio valuation *before* trading on 'date' ---
+            # Use prices from the *previous* available index for valuation before trade
+            # Find the index location for 'date' and get the previous one
+            current_date_loc = backtest_data.index.get_loc(date)
+            if current_date_loc == 0:
+                 # Cannot value on the very first day before trading, use initial capital
+                 current_portfolio_value = self._cash
+                 # Store initial portfolio value using the first shifted signal date
+                 if not self._portfolio_history: # Store only once
+                     self._portfolio_history.append((date, current_portfolio_value))
+            else:
+                 prev_date = backtest_data.index[current_date_loc - 1]
+                 current_portfolio_value = self._cash
+                 for ticker in self.tickers:
+                     close_price_col = f'{ticker}_Close'
+                     # Use previous day's close for valuation before today's trades
+                     if close_price_col in backtest_data.columns and prev_date in backtest_data.index:
+                         price = backtest_data.loc[prev_date, close_price_col]
+                         if pd.notna(price) and price > 0:
+                             current_portfolio_value += self._positions[ticker] * price
+                 # Store portfolio value *before* trades for this period
+                 self._portfolio_history.append((date, current_portfolio_value))
+
+
+            # --- Execute trades based on *yesterday's* signal, using *today's* price ---
+            daily_signals = signals_shifted.loc[date]
+            prices_for_trade = {} # Get actual trading prices for 'date'
+
             for ticker in self.tickers:
                  close_price_col = f'{ticker}_Close'
                  if close_price_col in backtest_data.columns and date in backtest_data.index:
                      price = backtest_data.loc[date, close_price_col]
                      if pd.notna(price) and price > 0:
-                         current_portfolio_value += self._positions[ticker] * price
-                         prices_today[ticker] = price # Store price for trading
+                          prices_for_trade[ticker] = price
 
-            self._portfolio_history.append((date, current_portfolio_value))
-
-            # Execute trades based on signals for the current date
             for ticker in self.tickers:
                 signal = daily_signals[ticker]
-                trade_price = prices_today.get(ticker)
+                trade_price = prices_for_trade.get(ticker) # Use today's price
 
                 if pd.isna(trade_price) or trade_price <= 0:
-                    # print(f"Warning: No valid price for {ticker} on {date}. Skipping trade.")
-                    continue # Skip if no valid price
+                    # print(f"Warning: Valid trade price not available for {ticker} on {date}. Skipping trade.") # Optional
+                    continue # Skip trade if no valid price
 
+                # Determine desired position based on signal & current value
+                # Use the *pre-trade* portfolio value calculated earlier for sizing
                 target_trade_value = current_portfolio_value * self.trade_size_fraction
-                shares_to_trade = target_trade_value / trade_price
+                target_shares = target_trade_value / trade_price if trade_price > 0 else 0
 
-                # --- Buy Signal ---
-                if signal == 1:
-                    # Simple logic: If not already holding, buy. If holding, do nothing (or could add logic to increase position).
-                    if self._positions[ticker] == 0:
-                        if self._cash >= target_trade_value:
-                             actual_shares = np.floor(shares_to_trade)
-                             cost = actual_shares * trade_price
-                             self._positions[ticker] += actual_shares
-                             self._cash -= cost
-                             self.trades.append({'Date': date, 'Ticker': ticker, 'Action': 'BUY',
-                                                 'Shares': actual_shares, 'Price': trade_price, 'Cost': cost})
-                             # print(f"{date}: BUY {actual_shares:.0f} {ticker} @ {trade_price:.2f}")
-                        # else:
-                            # print(f"{date}: Buy signal for {ticker}, but insufficient cash.")
+                current_shares = self._positions[ticker]
 
-                # --- Sell Signal ---
-                elif signal == -1:
-                     # Simple logic: If holding shares, sell all. If not holding, do nothing (or could add shorting logic).
-                     if self._positions[ticker] > 0:
-                         shares_held = self._positions[ticker]
-                         proceeds = shares_held * trade_price
-                         self._cash += proceeds
-                         self._positions[ticker] = 0.0
-                         self.trades.append({'Date': date, 'Ticker': ticker, 'Action': 'SELL',
-                                              'Shares': shares_held, 'Price': trade_price, 'Cost': -proceeds})
-                         # print(f"{date}: SELL {shares_held:.0f} {ticker} @ {trade_price:.2f}")
+                # Simplified logic: If buy signal and not already long -> buy target shares
+                # If sell signal and currently long -> sell all shares held
+                if signal == 1 and current_shares <= 1e-9: # Buy condition (use tolerance)
+                     if target_shares > 0: # Ensure calculated shares are positive
+                         # Use floor/round for share calculation if needed, here using fractional
+                         self._execute_trade(date, ticker, 'BUY', target_shares, trade_price)
+                elif signal == -1 and current_shares > 1e-9: # Sell condition (use tolerance)
+                    # Selling all current shares, not based on target_shares for sell signal
+                    self._execute_trade(date, ticker, 'SELL', current_shares, trade_price)
+                # Add logic for short selling if needed based on signal == -1 and current_shares <= 1e-9
 
-        self.portfolio = pd.DataFrame(self._portfolio_history, columns=['Date', 'PortfolioValue']).set_index('Date')
-        print("Backtest simulation complete.")
+        # Final portfolio calculation after the loop
+        # Use the last recorded date in portfolio history for final valuation basis
+        if self._portfolio_history:
+            last_recorded_date = self._portfolio_history[-1][0]
+            # Find the latest data point >= last_recorded_date for final price
+            final_valuation_data_points = backtest_data[backtest_data.index >= last_recorded_date]
+            if not final_valuation_data_points.empty:
+                final_valuation_date = final_valuation_data_points.index[0]
+
+                final_portfolio_value = self._cash
+                for ticker in self.tickers:
+                    close_price_col = f'{ticker}_Close'
+                    if close_price_col in backtest_data.columns and final_valuation_date in backtest_data.index:
+                        price = backtest_data.loc[final_valuation_date, close_price_col]
+                        if pd.notna(price) and price > 0:
+                            final_portfolio_value += self._positions[ticker] * price
+                        else: # Fallback to last known price if final price is NaN
+                           last_valid_price_index = backtest_data[close_price_col].last_valid_index()
+                           if last_valid_price_index is not None:
+                                price = backtest_data.loc[last_valid_price_index, close_price_col]
+                                if pd.notna(price) and price > 0:
+                                     final_portfolio_value += self._positions[ticker] * price
+                # Append final value using the date it was calculated for
+                self._portfolio_history.append((final_valuation_date, final_portfolio_value))
+            else: # If no data after last recorded date, use the last recorded value
+                 pass # The last value is already in history
+
+        elif not backtest_data.empty:
+             # Handle case where signals were generated but all NaN after shift
+             final_portfolio_value = self._cash # Only cash
+             # Use last data point available if possible
+             self._portfolio_history.append((backtest_data.index[-1], final_portfolio_value))
+
+
+        # Convert portfolio history to DataFrame
+        if self._portfolio_history:
+            self.portfolio = pd.DataFrame(self._portfolio_history, columns=['Date', 'PortfolioValue']).set_index('Date')
+            # Ensure index is unique, keep last entry if duplicates exist
+            self.portfolio = self.portfolio[~self.portfolio.index.duplicated(keep='last')]
+            # Ensure index is datetime
+            self.portfolio.index = pd.to_datetime(self.portfolio.index)
+            # Ensure index is sorted
+            self.portfolio = self.portfolio.sort_index()
+            self.portfolio['returns'] = self.portfolio['PortfolioValue'].pct_change().fillna(0)
+        else:
+            # Create an empty DataFrame with expected columns
+            self.portfolio = pd.DataFrame(columns=['PortfolioValue', 'returns'])
+            self.portfolio.index.name = 'Date'
+            self.portfolio.index = pd.to_datetime(self.portfolio.index)
+
+        print("Backtest simulation finished.")
 
     def calculate_performance(self, risk_free_rate: float = 0.0):
-        """Calculates performance metrics for the backtest."""
-        if self.portfolio is None or self.portfolio.empty:
-            print("No portfolio data available. Run run_backtest() first.")
-            return None
+        """Calculates performance metrics for the backtest.
+
+        Args:
+            risk_free_rate (float): Annual risk-free rate for Sharpe ratio calculation.
+
+        Returns:
+            dict: A dictionary containing key performance metrics.
+        """
+        if self.portfolio is None or self.portfolio.empty or len(self.portfolio) < 2:
+            print("Portfolio data not available or insufficient for performance calculation (requires >= 2 data points).")
+            # Return default metrics
+            metrics = {
+                'Initial Capital': self.initial_capital,
+                'Final Portfolio Value': self._cash if self.portfolio is None or self.portfolio.empty else self.portfolio['PortfolioValue'].iloc[-1],
+                'Total Return (%)': ((self._cash / self.initial_capital - 1) * 100
+                                   if self.initial_capital > 0 else 0.0),
+                'Annualized Return (%)': 0.0,
+                'Annualized Volatility (%)': 0.0,
+                'Sharpe Ratio': np.nan,
+                'Max Drawdown (%)': 0.0,
+                'Number of Trades': len(self.trades),
+                'Win Rate (%)': np.nan
+            }
+            # If portfolio exists but has only one row, calculate final value/return based on that
+            if self.portfolio is not None and len(self.portfolio) == 1:
+                 metrics['Final Portfolio Value'] = self.portfolio['PortfolioValue'].iloc[-1]
+                 metrics['Total Return (%)'] = ((metrics['Final Portfolio Value'] / self.initial_capital - 1) * 100
+                                              if self.initial_capital > 0 else 0.0)
+            return metrics
 
         print("Calculating performance metrics...")
-        portfolio = self.portfolio['PortfolioValue']
 
-        # 1. Total Return
-        total_return = (portfolio.iloc[-1] / self.initial_capital) - 1
+        # Basic metrics
+        final_value = self.portfolio['PortfolioValue'].iloc[-1]
+        total_return = (final_value / self.initial_capital - 1) * 100 if self.initial_capital > 0 else 0.0
 
-        # 2. Annualized Return
-        years = (portfolio.index[-1] - portfolio.index[0]).days / 365.25
-        annualized_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
+        # Time-based calculations
+        time_delta = self.portfolio.index[-1] - self.portfolio.index[0]
+        min_year_fraction = 1.0 / (365.25 * 24 * 60 * 60) # Min duration = 1 second in years
+        years = max(time_delta.total_seconds() / (365.25 * 24 * 60 * 60), min_year_fraction)
 
-        # 3. Portfolio Daily Returns
-        daily_returns = portfolio.pct_change().dropna()
+        # Annualized Return (Geometric)
+        if self.initial_capital > 0:
+            base_ratio = max(final_value / self.initial_capital, 0)
+            annualized_return = (base_ratio ** (1 / years) - 1) * 100
+        else:
+             annualized_return = 0.0
 
-        # 4. Annualized Volatility (Standard Deviation)
-        annualized_volatility = daily_returns.std() * np.sqrt(252) # Assuming 252 trading days
+        # Portfolio returns
+        portfolio_returns = self.portfolio['PortfolioValue'].pct_change().dropna()
+        if isinstance(portfolio_returns, float):
+            portfolio_returns = pd.Series([portfolio_returns], index=[self.portfolio.index[1]])
 
-        # 5. Sharpe Ratio
-        sharpe_ratio = ((annualized_return - risk_free_rate) / annualized_volatility
-                        if annualized_volatility != 0 else np.nan)
+        if portfolio_returns.empty:
+             annualized_volatility = 0.0
+             sharpe_ratio = np.nan
+             max_drawdown = 0.0
+        else:
+            # --- Dynamic Annualization for Volatility/Sharpe ---
+            trading_periods_per_year = 252 # Default
+            inferred_freq = pd.infer_freq(self.portfolio.index)
+            if inferred_freq:
+                freq_map = {
+                    'B': 252, 'D': 365, 'W': 52, 'M': 12, 'MS': 12,
+                    'Q': 4, 'QS': 4, 'A': 1, 'Y': 1, 'AS': 1, 'YS': 1,
+                    'H': 252 * 6.5, 'T': 252 * 6.5 * 60, 'min': 252 * 6.5 * 60,
+                    'S': 252 * 6.5 * 60 * 60, 'L': 252 * 6.5 * 60 * 60 * 1000, 'ms': 252 * 6.5 * 60 * 60 * 1000,
+                    'U': 252 * 6.5 * 60 * 60 * 1000 * 1000, 'us': 252 * 6.5 * 60 * 60 * 1000 * 1000
+                }
+                freq_str_norm = inferred_freq.split('-')[0].upper()
+                if freq_str_norm in freq_map:
+                    trading_periods_per_year = freq_map[freq_str_norm]
+                else:
+                    # Try interval calculation
+                    avg_interval_seconds = portfolio_returns.index.to_series().diff().mean().total_seconds()
+                    if pd.notna(avg_interval_seconds) and avg_interval_seconds > 0:
+                        seconds_in_trading_year = 252 * 6.5 * 60 * 60
+                        trading_periods_per_year = seconds_in_trading_year / avg_interval_seconds
+                        print(f"Note: Annualizing based on inferred average interval ({avg_interval_seconds:.2f}s). Assumes 6.5h/day, 252 days/yr.")
+                    else:
+                        print("Warning: Could not determine trading periods per year from interval. Using 252.")
+                        trading_periods_per_year = 252
+            else:
+                print("Warning: Could not infer data frequency. Assuming 252 trading periods/year.")
+                trading_periods_per_year = 252
 
-        # 6. Maximum Drawdown
-        cumulative_returns = (1 + daily_returns).cumprod()
-        peak = cumulative_returns.expanding(min_periods=1).max()
-        drawdown = (cumulative_returns / peak) - 1
-        max_drawdown = drawdown.min()
+            trading_periods_per_year = max(trading_periods_per_year, 1)
 
-        # 7. Win Rate (optional, requires trade analysis)
-        wins = sum(1 for trade in self.trades if trade['Action'] == 'SELL' and trade['Cost'] < 0) # Sell proceeds > buy cost implied
-        losses = sum(1 for trade in self.trades if trade['Action'] == 'SELL' and trade['Cost'] >= 0) # Basic check
-        total_closed_trades = wins + losses
-        win_rate = wins / total_closed_trades if total_closed_trades > 0 else 0.0
-        # Note: This win rate is simplified; a proper calculation needs to track entry/exit pairs.
+            # Annualized Volatility
+            volatility = portfolio_returns.std()
+            if pd.isna(volatility) or volatility < 1e-9:
+                annualized_volatility = 0.0
+            else:
+                annualized_volatility = volatility * np.sqrt(trading_periods_per_year) * 100
 
-        performance = {
-            "Initial Capital": self.initial_capital,
-            "Final Portfolio Value": portfolio.iloc[-1],
-            "Total Return (%)": total_return * 100,
-            "Annualized Return (%)": annualized_return * 100,
-            "Annualized Volatility (%)": annualized_volatility * 100,
-            "Sharpe Ratio": sharpe_ratio,
-            "Max Drawdown (%)": max_drawdown * 100,
-            "Number of Trades": len(self.trades),
-            "Win Rate (%)": win_rate * 100 # Simplified
+            # Sharpe Ratio
+            if annualized_volatility > 1e-6:
+                annualized_mean_return_pct = annualized_return # Use geometric annualized return
+                sharpe_ratio = (annualized_mean_return_pct - (risk_free_rate * 100)) / annualized_volatility
+            else:
+                sharpe_ratio = np.nan # Undefined if volatility is zero
+
+            # Max Drawdown
+            cumulative_returns = (1 + portfolio_returns).cumprod()
+            peak = cumulative_returns.cummax()
+            drawdown = (cumulative_returns - peak) / peak
+            max_drawdown = drawdown.min() * 100 if not drawdown.empty else 0.0
+
+
+        # Trade-based metrics
+        win_rate = np.nan
+        num_closing_trades = 0
+        total_trades = len(self.trades)
+        if self.trades:
+            trades_df = pd.DataFrame(self.trades)
+            # Consider only closing trades (SELL in long-only) with valid PnL
+            closing_trades = trades_df[(trades_df['side'] == 'SELL') & trades_df['pnl'].notna()]
+            num_closing_trades = len(closing_trades)
+            if num_closing_trades > 0:
+                # A win is a closing trade with positive PnL (use tolerance)
+                winning_trades_count = len(closing_trades[closing_trades['pnl'] > 1e-9])
+                win_rate = (winning_trades_count / num_closing_trades) * 100
+
+        metrics = {
+            'Initial Capital': self.initial_capital,
+            'Final Portfolio Value': final_value,
+            'Total Return (%)': total_return,
+            'Annualized Return (%)': annualized_return,
+            'Annualized Volatility (%)': annualized_volatility,
+            'Sharpe Ratio': sharpe_ratio,
+            'Max Drawdown (%)': max_drawdown,
+            'Number of Trades': total_trades, # Total buys and sells executed
+            'Win Rate (%)': win_rate # Based on closing trades with realized PnL
         }
 
-        print("Performance Metrics:")
-        for key, value in performance.items():
-            print(f"- {key}: {value:.2f}")
+        print("--- Performance Metrics ---")
+        for key, value in metrics.items():
+            if isinstance(value, (float, np.number)):
+                 print(f"- {key}: {value:.2f}")
+            else:
+                 print(f"- {key}: {value}")
+        print("-------------------------")
 
-        return performance
+        return metrics
 
 
     def plot_results(self):
@@ -320,10 +550,10 @@ class SimpleBacktester:
         ax_portfolio.plot(self.portfolio.index, self.portfolio['PortfolioValue'], label='Portfolio Value')
         # Optional: Add buy/sell markers based on actual trades on portfolio plot
         # Filter trades to match portfolio index dates if necessary
-        valid_trade_dates = [pd.Timestamp(trade['Date']) for trade in self.trades]
-        valid_trades = [trade for trade in self.trades if pd.Timestamp(trade['Date']) in self.portfolio.index]
-        buy_dates_trades = [pd.Timestamp(trade['Date']) for trade in valid_trades if trade['Action'] == 'BUY']
-        sell_dates_trades = [pd.Timestamp(trade['Date']) for trade in valid_trades if trade['Action'] == 'SELL']
+        valid_trade_dates = [pd.Timestamp(trade['date']) for trade in self.trades]
+        valid_trades = [trade for trade in self.trades if pd.Timestamp(trade['date']) in self.portfolio.index]
+        buy_dates_trades = [pd.Timestamp(trade['date']) for trade in valid_trades if trade['side'] == 'BUY']
+        sell_dates_trades = [pd.Timestamp(trade['date']) for trade in valid_trades if trade['side'] == 'SELL']
 
         if buy_dates_trades:
             buy_values = self.portfolio.loc[buy_dates_trades, 'PortfolioValue']
