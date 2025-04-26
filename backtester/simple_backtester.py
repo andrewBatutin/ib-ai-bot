@@ -95,7 +95,7 @@ class SimpleBacktester:
 
     def __init__(self, data: pd.DataFrame,
                  initial_cash: float = 100000.0,
-                 commission_per_trade: float = 0.0,
+                 commission_per_trade: float = 1.0,
                  bar_type: str = 'time',
                  volume_threshold: float | None = None,
                  target_bars_per_day: int | None = 50, # Default target if using volume bars without explicit threshold
