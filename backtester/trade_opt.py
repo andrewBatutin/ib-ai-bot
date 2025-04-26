@@ -2,7 +2,11 @@ import pandas as pd
 import itertools
 import numpy as np
 import time
-from .simple_backtester import SimpleBacktester # Use relative import
+import logging
+
+# Configure logging (can be configured elsewhere if part of a larger app)
+# Basic config if run as script
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class GridSearchOptimizer:
     """
@@ -47,6 +51,7 @@ class GridSearchOptimizer:
         self.best_score = -np.inf if higher_is_better else np.inf
 
         if 'strategy_name' not in fixed_params:
+             logging.error("fixed_params must include 'strategy_name'.")
              raise ValueError("fixed_params must include 'strategy_name'.")
 
     def _generate_combinations(self):
@@ -62,16 +67,16 @@ class GridSearchOptimizer:
         start_time = time.time()
 
         if self.verbose:
-            print(f"Starting Grid Search with {num_combinations} combinations...")
-            print(f"Optimizing for: {self.metric_to_optimize} ({'Higher' if self.higher_is_better else 'Lower'} is better)")
-            print(f"Fixed Parameters: {self.fixed_params}")
-            print(f"Parameter Grid: {self.param_grid}")
-            print("-" * 30)
+            logging.info(f"Starting Grid Search with {num_combinations} combinations...")
+            logging.info(f"Optimizing for: {self.metric_to_optimize} ({'Higher' if self.higher_is_better else 'Lower'} is better)")
+            logging.info(f"Fixed Parameters: {self.fixed_params}")
+            logging.info(f"Parameter Grid: {self.param_grid}")
+            logging.info("-" * 30)
 
 
         for i, params in enumerate(parameter_combinations):
             if self.verbose:
-                print(f"Running combination {i+1}/{num_combinations}: {params}")
+                logging.info(f"Running combination {i+1}/{num_combinations}: {params}")
 
             # --- Prepare parameters for the specific backtester run ---
             current_run_params = self.fixed_params.copy()
@@ -111,14 +116,14 @@ class GridSearchOptimizer:
                     if metric_value is None or (isinstance(metric_value, float) and np.isnan(metric_value)):
                          metric_value = -np.inf if self.higher_is_better else np.inf
                          if self.verbose:
-                             print(f"  -> Warning: Metric '{self.metric_to_optimize}' not found or NaN.")
+                             logging.warning(f"Metric '{self.metric_to_optimize}' not found or NaN for params {params}.")
 
                     results_list.append({
                         **params, # Record the grid parameters used
                         **performance # Add all performance metrics
                     })
                     if self.verbose:
-                        print(f"  -> Result: {self.metric_to_optimize} = {metric_value:.4f}")
+                        logging.info(f"  -> Result: {self.metric_to_optimize} = {metric_value:.4f}")
 
                     # Update best score if necessary
                     is_better = (self.higher_is_better and metric_value > self.best_score) or \
@@ -126,15 +131,17 @@ class GridSearchOptimizer:
                     if is_better:
                         self.best_score = metric_value
                         self.best_params = params
+                        if self.verbose:
+                             logging.info(f"  -> New best score found.")
 
                 else:
                     if self.verbose:
-                        print("  -> No performance data returned.")
+                        logging.info("  -> No performance data returned.")
                     results_list.append({**params, self.metric_to_optimize: -np.inf if self.higher_is_better else np.inf})
 
             except Exception as e:
                 if self.verbose:
-                    print(f"  -> ERROR running combination {params}: {e}")
+                    logging.error(f"ERROR running combination {params}: {e}", exc_info=True)
                 # Record failure, assign a poor score
                 results_list.append({**params, self.metric_to_optimize: -np.inf if self.higher_is_better else np.inf})
 
@@ -161,20 +168,20 @@ class GridSearchOptimizer:
 
         end_time = time.time()
         if self.verbose:
-            print("-" * 30)
-            print(f"Grid Search finished in {end_time - start_time:.2f} seconds.")
+            logging.info("-" * 30)
+            logging.info(f"Grid Search finished in {end_time - start_time:.2f} seconds.")
             if self.best_params:
-                print(f"Best {self.metric_to_optimize}: {self.best_score:.4f}")
-                print(f"Best Parameters: {self.best_params}")
+                logging.info(f"Best {self.metric_to_optimize}: {self.best_score:.4f}")
+                logging.info(f"Best Parameters: {self.best_params}")
             else:
-                 print("No successful combination found.")
-            print("-" * 30)
+                 logging.info("No successful combination found or no parameters improved the score.")
+            logging.info("-" * 30)
 
         return self.results_df, self.best_params
 
 # --- Example Usage ---
 if __name__ == "__main__":
-    print("Running Grid Search Optimizer Example...")
+    logging.info("Running Grid Search Optimizer Example...")
 
     # --- Fixed Parameters for the Backtest ---
     fixed_params_example = {
@@ -210,19 +217,26 @@ if __name__ == "__main__":
         verbose=True # Show progress
     )
 
-    # Run the search
-    results_dataframe, best_parameters = optimizer.run_search()
+    logging.info("Starting example optimization run...")
+    results, best_params = optimizer.run_search()
 
     # --- Display Results ---
-    if results_dataframe is not None:
-        print("--- Optimization Results Summary ---")
-        # Display top 5 results
-        print(results_dataframe.head().to_string())
+    if results is not None and not results.empty:
+        logging.info("\n--- Optimization Results Summary ---")
+        logging.info(f"Best {metric} score: {optimizer.best_score:.4f}")
+        logging.info(f"Best parameters found: {best_params}")
+        logging.info("\n--- Top 5 Combinations ---")
+        # Log the top 5 rows of the DataFrame
+        top_5_log_str = results.head().to_string()
+        logging.info("\n" + top_5_log_str)
 
-        print("--- Best Parameters Found ---")
-        print(best_parameters)
+        # Optional: Save results to CSV
+        try:
+            results_filename = "grid_search_results.csv"
+            results.to_csv(results_filename, index=False)
+            logging.info(f"\nFull results saved to {results_filename}")
+        except Exception as e:
+            logging.error(f"Error saving results to CSV: {e}", exc_info=True)
 
-        print("--- WARNING: Overfitting Risk ---")
-        print("Parameters optimized on in-sample data. Validate on out-of-sample data.")
     else:
-        print("Optimization did not produce any results.")
+        logging.info("Optimization did not produce any results.")

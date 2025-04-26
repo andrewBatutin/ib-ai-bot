@@ -4,9 +4,13 @@ import pandas as pd
 import numpy as np
 import yfinance as yf
 import matplotlib.pyplot as plt # Ensure pyplot is imported
+import logging # Add logging import
 
 # Import the strategy functions
 from .strategies import generate_average_volatility_signals, generate_bollinger_bands_signals
+
+# Configure logging
+logging.basicConfig(level=logging.WARNING, format='%(asctime)s - %(levelname)s - %(message)s')
 
 class SimpleBacktester:
     """
@@ -81,15 +85,20 @@ class SimpleBacktester:
         elif self.strategy_name == 'bollinger_bands':
             required_params = {'window', 'num_std'}
         else:
+            # Use logging for errors
+            logging.error(f"Unknown strategy name: {self.strategy_name}")
             raise ValueError(f"Unknown strategy name: {self.strategy_name}")
 
         missing_params = required_params - set(self.strategy_params.keys())
         if missing_params:
+            # Use logging for errors
+            logging.error(f"Missing parameters for strategy '{self.strategy_name}': {missing_params}")
             raise ValueError(f"Missing parameters for strategy '{self.strategy_name}': {missing_params}")
 
     def _fetch_data(self):
         """Fetches historical adjusted closing prices using yfinance."""
-        print(f"Fetching data for {self.tickers} from {self.start_date} to {self.end_date} with interval {self.interval}...")
+        # Use logging for informational messages
+        logging.info(f"Fetching data for {self.tickers} from {self.start_date} to {self.end_date} with interval {self.interval}...")
         try:
             # Fetch Adj Close for returns, Close for trade execution price
             data = yf.download(self.tickers, start=self.start_date, end=self.end_date, progress=False, interval=self.interval, prepost=True)
@@ -117,21 +126,25 @@ class SimpleBacktester:
             if self.data.empty:
                  raise ValueError("Data became empty after dropping NaNs.")
 
-            print("Data fetched successfully.")
-            # print(self.data.head()) # Optional: Print head for verification
+            # Use logging for success messages
+            logging.info("Data fetched successfully.")
+            # logging.debug(self.data.head()) # Optional: Print head for verification
 
         except Exception as e:
-            print(f"Error fetching data: {e}")
+            # Use logging for exceptions
+            logging.error(f"Error fetching data: {e}", exc_info=True) # Include traceback
             self.data = None
 
 
     def _calculate_signals(self):
         """Calculates trading signals using the selected strategy."""
         if self.data is None or self.data.empty:
-            print("No data available. Run _fetch_data() first.")
+            # Use logging for warnings or errors
+            logging.warning("No data available. Run _fetch_data() first.")
             return
 
-        print(f"Calculating signals using '{self.strategy_name}' strategy...")
+        # Use logging for informational messages
+        logging.info(f"Calculating signals using '{self.strategy_name}' strategy...")
         self.signals = pd.DataFrame(index=self.data.index)
 
         for ticker in self.tickers:
@@ -139,7 +152,8 @@ class SimpleBacktester:
             if price_col_base in self.data.columns:
                 price_series = self.data[price_col_base]
             else:
-                print(f"Warning: Price column '{price_col_base}' not found directly for {ticker}. Skipping signal calculation.")
+                # Use logging for warnings
+                logging.warning(f"Price column '{price_col_base}' not found directly for {ticker}. Skipping signal calculation.")
                 self.signals[ticker] = 0 # Assign hold signal if price data is missing
                 continue
 
@@ -158,19 +172,22 @@ class SimpleBacktester:
                 )
             else:
                 # This should not happen due to validation in __init__, but added for safety
-                print(f"Error: Strategy '{self.strategy_name}' function not implemented in _calculate_signals.")
+                # Use logging for critical errors
+                logging.error(f"Strategy '{self.strategy_name}' function not implemented in _calculate_signals.")
                 ticker_signals = pd.Series(0, index=price_series.index, dtype=int)
 
             self.signals[ticker] = ticker_signals
 
-        print("Signals calculated.")
+        # Use logging for success messages
+        logging.info("Signals calculated.")
 
 
     def _execute_trade(self, date, ticker, side, shares, price):
         """Executes a single trade and updates portfolio state, including average cost and PnL."""
         # Ensure shares and price are valid numbers
         if not isinstance(shares, (int, float)) or not isinstance(price, (int, float)) or pd.isna(shares) or pd.isna(price) or shares <= 1e-9 or price <= 0:
-             print(f"Warning: Invalid shares ({shares}) or price ({price}) for trade on {date} for {ticker}. Skipping.")
+             # Use logging for warnings
+             logging.warning(f"Invalid shares ({shares}) or price ({price}) for trade on {date} for {ticker}. Skipping.")
              return
 
         pnl = 0.0 # Initialize PnL for this trade
@@ -193,15 +210,18 @@ class SimpleBacktester:
 
                 self._cash -= total_cost
                 self._positions[ticker] = new_position
+                # Log buy trade execution
+                logging.info(f"Executed BUY: {shares:.4f} {ticker} @ {price:.2f} on {date}. Cost: {total_cost:.2f}")
                 self.trades.append({
                     'date': date, 'ticker': ticker, 'side': side,
                     'shares': shares, 'price': price, 'trade_value': trade_cost,
                     'avg_cost_after': self._average_cost[ticker], 'pnl': pnl, # PnL is 0 for buy
                     'commission': commission
                 })
-                # print(f"{date}: BOUGHT {shares:.4f} {ticker} @ {price:.2f}") # Optional log
+                # logging.debug(f"{date}: BOUGHT {shares:.4f} {ticker} @ {price:.2f}") # Optional log
             else:
-                print(f"Warning: Insufficient cash ({self._cash:.2f}) to buy {shares:.4f} {ticker} @ {price:.2f} (Cost: {trade_cost:.2f}, Commission: {commission:.2f}) on {date}. Skipping trade.")
+                # Use logging for warnings
+                logging.warning(f"Insufficient cash ({self._cash:.2f}) to buy {shares:.4f} {ticker} @ {price:.2f} (Cost: {trade_cost:.2f}, Commission: {commission:.2f}) on {date}. Skipping trade.")
         elif side == 'SELL':
             # Ensure we have enough shares to sell (allow for float precision issues)
             # Sell at most the shares we currently hold
@@ -216,7 +236,7 @@ class SimpleBacktester:
                     pnl = trade_proceeds - cost_of_goods_sold
                 else:
                      pnl = 0.0 # PnL is 0 if selling without a tracked buy/cost basis
-                     # print(f"Warning: Selling {shares_to_sell:.4f} {ticker} on {date} without a recorded average cost.")
+                     # logging.warning(f"Selling {shares_to_sell:.4f} {ticker} on {date} without a recorded average cost.") # Optional warning
 
                 commission = self.commission_per_trade
                 self._cash += trade_proceeds - commission
@@ -227,25 +247,32 @@ class SimpleBacktester:
                     self._positions[ticker] = 0.0 # Clean up small residuals
                     self._average_cost[ticker] = 0.0 # Reset average cost
 
+                # Log sell trade execution
+                logging.info(f"Executed SELL: {shares_to_sell:.4f} {ticker} @ {price:.2f} on {date}. Proceeds: {trade_proceeds:.2f}. PnL: {pnl:.2f}")
                 self.trades.append({
                     'date': date, 'ticker': ticker, 'side': side,
                     'shares': shares_to_sell, 'price': price, 'trade_value': trade_proceeds,
                     'avg_cost_after': self._average_cost[ticker], 'pnl': pnl, # Record realized PnL
                     'commission': commission
                 })
-                # print(f"{date}: SOLD {shares_to_sell:.4f} {ticker} @ {price:.2f}, PnL: {pnl:.2f}") # Optional log
+                # logging.debug(f"{date}: SOLD {shares_to_sell:.4f} {ticker} @ {price:.2f}, PnL: {pnl:.2f}") # Optional log
             # else: # If shares_to_sell is negligible or negative, don't execute
             #    if shares > 1e-9: # Only warn if the *requested* sell was significant
-            #         print(f"Warning: Attempted to sell {shares:.4f} {ticker} on {date}, but holding {self._positions[ticker]:.4f}. Selling {shares_to_sell:.4f}.")
+            #         logging.warning(f"Attempted to sell {shares:.4f} {ticker} on {date}, but holding {self._positions[ticker]:.4f}. Selling {shares_to_sell:.4f}.")
+            else:
+                # Use logging for warnings
+                logging.warning(f"Attempted to sell {shares} {ticker} on {date}, but only hold {self._positions[ticker]}. Skipping sell.")
 
 
     def run_backtest(self):
         """Runs the backtest simulation based on generated signals."""
         if self.signals is None or self.signals.empty:
-            print("No signals available. Run _calculate_signals() first.")
+            # Use logging for warnings or errors
+            logging.warning("No signals available. Run _calculate_signals() first.")
             return
 
-        print("Running backtest simulation...")
+        # Use logging for informational messages
+        logging.info("Running backtest simulation...")
         self._cash = self.initial_capital
         self._positions = {ticker: 0.0 for ticker in self.tickers}
         self._portfolio_history = []
@@ -268,7 +295,7 @@ class SimpleBacktester:
         for date in signals_shifted.index:
             # Ensure the current date exists in our price data (it should, as we shifted)
             if date not in backtest_data.index:
-                # print(f"Warning: Price data missing for execution date {date}. Skipping.") # Optional warning
+                # logging.warning(f"Warning: Price data missing for execution date {date}. Skipping.") # Optional warning
                 continue
 
             # --- Portfolio valuation *before* trading on 'date' ---
@@ -311,7 +338,7 @@ class SimpleBacktester:
                 trade_price = prices_for_trade.get(ticker) # Use today's price
 
                 if pd.isna(trade_price) or trade_price <= 0:
-                    # print(f"Warning: Valid trade price not available for {ticker} on {date}. Skipping trade.") # Optional
+                    # logging.warning(f"Warning: Valid trade price not available for {ticker} on {date}. Skipping trade.") # Optional
                     continue # Skip trade if no valid price
 
                 # Determine desired position based on signal & current value
@@ -382,7 +409,8 @@ class SimpleBacktester:
             self.portfolio.index.name = 'Date'
             self.portfolio.index = pd.to_datetime(self.portfolio.index)
 
-        print("Backtest simulation finished.")
+        # Use logging for completion messages
+        logging.info("Backtest simulation finished.")
 
     def calculate_performance(self, risk_free_rate: float = 0.0):
         """Calculates performance metrics for the backtest.
@@ -394,7 +422,8 @@ class SimpleBacktester:
             dict: A dictionary containing key performance metrics.
         """
         if self.portfolio is None or self.portfolio.empty or len(self.portfolio) < 2:
-            print("Portfolio data not available or insufficient for performance calculation (requires >= 2 data points).")
+            # Use logging for warnings or errors
+            logging.warning("Portfolio data not available or insufficient for performance calculation (requires >= 2 data points).")
             # Return default metrics
             metrics = {
                 'Initial Capital': self.initial_capital,
@@ -415,7 +444,8 @@ class SimpleBacktester:
                                               if self.initial_capital > 0 else 0.0)
             return metrics
 
-        print("Calculating performance metrics...")
+        # Use logging for informational messages
+        logging.info("Calculating performance metrics...")
 
         # Basic metrics
         final_value = self.portfolio['PortfolioValue'].iloc[-1]
@@ -463,12 +493,12 @@ class SimpleBacktester:
                     if pd.notna(avg_interval_seconds) and avg_interval_seconds > 0:
                         seconds_in_trading_year = 252 * 6.5 * 60 * 60
                         trading_periods_per_year = seconds_in_trading_year / avg_interval_seconds
-                        print(f"Note: Annualizing based on inferred average interval ({avg_interval_seconds:.2f}s). Assumes 6.5h/day, 252 days/yr.")
+                        logging.info(f"Note: Annualizing based on inferred average interval ({avg_interval_seconds:.2f}s). Assumes 6.5h/day, 252 days/yr.")
                     else:
-                        print("Warning: Could not determine trading periods per year from interval. Using 252.")
+                        logging.warning("Warning: Could not determine trading periods per year from interval. Using 252.")
                         trading_periods_per_year = 252
             else:
-                print("Warning: Could not infer data frequency. Assuming 252 trading periods/year.")
+                logging.warning("Warning: Could not infer data frequency. Assuming 252 trading periods/year.")
                 trading_periods_per_year = 252
 
             trading_periods_per_year = max(trading_periods_per_year, 1)
@@ -520,13 +550,14 @@ class SimpleBacktester:
             'Win Rate (%)': win_rate # Based on closing trades with realized PnL
         }
 
-        print("--- Performance Metrics ---")
+        # Use logging for informational messages
+        logging.info("--- Performance Metrics ---")
         for key, value in metrics.items():
             if isinstance(value, (float, np.number)):
-                 print(f"- {key}: {value:.2f}")
+                 logging.info(f"- {key}: {value:.2f}")
             else:
-                 print(f"- {key}: {value}")
-        print("-------------------------")
+                 logging.info(f"- {key}: {value}")
+        logging.info("-------------------------")
 
         return metrics
 
@@ -534,13 +565,16 @@ class SimpleBacktester:
     def plot_results(self):
         """Plots the portfolio value over time and individual security prices with signals."""
         if self.portfolio is None or self.portfolio.empty:
-            print("No portfolio data to plot. Run run_backtest() first.")
+            # Use logging for warnings
+            logging.warning("No portfolio data to plot. Run run_backtest() first.")
             return
         if self.data is None or self.data.empty:
-            print("No price data available for plotting security charts.")
+            # Use logging for warnings
+            logging.warning("No price data available for plotting security charts.")
             return
         if self.signals is None or self.signals.empty:
-            print("No signal data available for plotting security charts.")
+            # Use logging for warnings
+            logging.warning("No signal data available for plotting security charts.")
             return
 
         num_tickers = len(self.tickers)
@@ -584,7 +618,8 @@ class SimpleBacktester:
                 ax = ax_tickers[i]
                 price_col = f'{ticker}_Close' # Use the close price for plotting
                 if price_col not in self.data.columns:
-                    print(f"Warning: Close price column '{price_col}' not found for {ticker}. Skipping price plot.")
+                    # Use logging for warnings
+                    logging.warning(f"Warning: Close price column '{price_col}' not found for {ticker}. Skipping price plot.")
                     continue
 
                 # Plot price
@@ -630,7 +665,7 @@ class SimpleBacktester:
 # --- Example Usage ---
 if __name__ == "__main__":
     # Example 1: Average Volatility Strategy
-    print("--- Running Average Volatility Strategy ---")
+    logging.info("--- Running Average Volatility Strategy ---")
     avg_vol_params = {
         'volatility_window': 21, # ~1 month
         'sigma_threshold': 1.5   # Trade if return > 1.5 * avg sigma
@@ -647,10 +682,10 @@ if __name__ == "__main__":
         commission_per_trade=5.0
     )
     backtester_avg_vol.run()
-    print("\n")
+    logging.info("\n")
 
     # Example 2: Bollinger Bands Strategy
-    print("--- Running Bollinger Bands Strategy ---")
+    logging.info("--- Running Bollinger Bands Strategy ---")
     bb_params = {
         'window': 20,    # 20-day SMA
         'num_std': 2.0   # 2 standard deviations
